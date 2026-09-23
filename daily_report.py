@@ -46,16 +46,17 @@ def to_ms(ts_bj):
 
 
 def fetch_orders(contract, begin_ms, end_ms):
-    """拉取 OKX 当日成交历史（demo 环境用 orders-history，归档接口不支持模拟盘）。
-    返回按时间升序的订单列表，含已平仓 pnl。"""
+    """拉取 OKX 当日成交历史（demo 环境仅支持 orders-history，且不支持 begin/end 时间参数）。
+    策略：拉最近订单（默认最近7天），在本地按时间区间过滤。返回升序订单列表，含已平仓 pnl。"""
     inst_okx = _INST_OKX.get(contract, contract)  # 内部代码 -> OKX SWAP 代码
-    params = {"instId": inst_okx, "begin": str(begin_ms), "end": str(end_ms), "limit": "100"}
-    # demo 模拟盘不支持 orders-history-archive（400），用普通历史接口
+    params = {"instId": inst_okx, "limit": "100"}
     data = okx_exec._private_request("GET", "/api/v5/trade/orders-history", params=params)
     orders = data.get("data", [])
+    # demo 环境不支持 begin/end（400），本地按 cTime 过滤区间
+    out = [o for o in orders if begin_ms <= int(o.get("cTime") or 0) < end_ms]
     # OKX 历史接口默认倒序（最新在前），统一升序便于展示
-    orders.sort(key=lambda o: int(o.get("uTime") or o.get("cTime") or 0))
-    return orders
+    out.sort(key=lambda o: int(o.get("uTime") or o.get("cTime") or 0))
+    return out
 
 
 def build_report(day_str, dry=False):
