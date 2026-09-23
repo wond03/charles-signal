@@ -22,7 +22,7 @@
       "entry": 85622.2
     },
     "BTC_USDT|5m|long": {
-      "status": "open",
+      "status": "closed",
       "algo_id": "3948257664836341760",
       "qty": 0.59,
       "time": "2026-09-23 21:20",
@@ -50,7 +50,7 @@
       "entry": 4328.9
     },
     "XAU_USDT|15m|short": {
-      "status": "open",
+      "status": "closed",
       "algo_id": "3948187182711738368",
       "qty": 59.0,
       "time": "2026-09-23 20:45",
@@ -64,7 +64,7 @@
       "entry": 4321.5
     },
     "XAU_USDT|5m|short": {
-      "status": "open",
+      "status": "closed",
       "algo_id": "3948177201107079168",
       "qty": 59.0,
       "time": "2026-09-23 20:40",
@@ -76,6 +76,20 @@
       "qty": 58.0,
       "time": "2026-09-23 20:15",
       "entry": 4320.9
+    },
+    "BTC_USDT|long": {
+      "status": "open",
+      "algo_id": "3948348033833930752",
+      "qty": 0.59,
+      "time": "2026-09-23 22:00",
+      "entry": 0
+    },
+    "XAU_USDT|short": {
+      "status": "open",
+      "algo_id": "3948348237609996288",
+      "qty": 59.0,
+      "time": "2026-09-23 22:00",
+      "entry": 0
     }
   },
   "opened_signals": {
@@ -166,6 +180,8 @@
     "XAU_USDT|5m|2026-09-23 20:40": 1,
     "XAU_USDT|15m|2026-09-23 20:45": 1,
     "BTC_USDT|5m|2026-09-23 21:05": 1,
-    "BTC_USDT|5m|2026-09-23 21:20": 1
+    "BTC_USDT|5m|2026-09-23 21:20": 1,
+    "BTC_USDT|1h|2026-09-23 22:00": 1,
+    "XAU_USDT|1h|2026-09-23 22:00": 1
   }
 }
