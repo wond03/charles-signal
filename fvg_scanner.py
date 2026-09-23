@@ -31,6 +31,8 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+import okx_exec
+
 GATE_URL = "https://api.gateio.ws/api/v4/futures/usdt/candlesticks"
 TIMEOUT = 15
 PUSHED_STATE_FILE = ".fvg_pushed.json"  # 已推送去重状态（脚本同目录）
@@ -413,6 +415,25 @@ def load_pushed_state():
         return {}
 
 
+def same_dir_positions(contract, f_type):
+    """同方向持仓检测（防刷屏）：该合约已有同方向持仓则 True；无则 False。
+    查询失败返回 None（fail-open：不拦截推送，避免信号丢失）。"""
+    try:
+        positions = okx_exec.get_positions(contract) or []
+    except Exception as e:  # noqa: BLE001
+        print(f"[skip-check] 持仓查询失败({type(e).__name__}: {e})，放行推送", file=sys.stderr)
+        return None
+    side = "long" if f_type == "bullish" else "short"
+    for p in positions:
+        try:
+            pos = abs(float(p.get("pos") or 0.0))
+        except (TypeError, ValueError):
+            continue
+        if p.get("posSide") == side and pos > 0:
+            return True
+    return False
+
+
 def save_pushed_state(state):
     """写入已推送 FVG 的去重状态。"""
     base = os.path.dirname(os.path.abspath(__file__))
@@ -485,6 +506,14 @@ def main():
         entry_price = latest_price(result["contract"]) or 0.0
         for time_str in sorted(by_time):
             items = by_time[time_str]
+            f0 = items[0][1]
+            holding = same_dir_positions(result["contract"], f0["type"])
+            if holding:
+                print(f"[skip] {result['contract']} {time_str}: 同方向持仓中，不推送")
+                if not args.no_dedup:
+                    for interval, f in items:
+                        state[f"{result['contract']}|{interval}|{f['time']}"] = 1
+                continue
             if len(items) >= 2:
                 resp = send_resonance(webhook, result["contract"], time_str, items, entry_price)
                 ok = 1 if isinstance(resp, dict) and resp.get("errcode") == 0 else 0
