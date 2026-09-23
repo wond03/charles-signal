@@ -213,7 +213,6 @@ def send_wecom(webhook, contract, interval, fvgs):
         lines.append(f"时间：<font color=\"warning\">{f['time']}</font>")
         lines.append(f"方向：{arrow}")
         lines.append(f"区间：[{f['bottom']}, {f['top']}]")
-        lines.append(f"缺口：{f['gap']}")
         lines.append("---")
     payload = {"msgtype": "markdown", "markdown": {"content": "\n".join(lines)}}
     r = requests.post(webhook, json=payload, timeout=TIMEOUT)
