@@ -15,10 +15,13 @@ FVG 定义: 三根K线模型
   python3 fvg_scanner.py --contract BTC_USDT                 # 默认 5m/15m/1h 三周期
   python3 fvg_scanner.py --contract XAU_USDT --intervals 15m
   python3 fvg_scanner.py --contract BTC_USDT --date 2026-09-23   # 指定分析日
+  python3 fvg_scanner.py --contract BTC_USDT --push          # 命中 FVG 时推送企业微信（含周期与时间）
 """
 
 import argparse
 import json
+import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -26,6 +29,7 @@ import requests
 
 GATE_URL = "https://api.gateio.ws/api/v4/futures/usdt/candlesticks"
 TIMEOUT = 15
+PUSHED_STATE_FILE = ".fvg_pushed.json"  # 已推送去重状态（脚本同目录）
 
 BJ_TZ = timezone(timedelta(hours=8))
 UTC_TZ = timezone.utc
@@ -177,6 +181,66 @@ def format_text(result):
     return "\n".join(lines)
 
 
+def load_webhook(explicit=None):
+    """确定企业微信 webhook：
+    优先级：--webhook > 环境变量 WECOM_WEBHOOK > 脚本同目录 config.yaml 的 wecom_webhook。
+    """
+    if explicit:
+        return explicit
+    env = os.environ.get("WECOM_WEBHOOK")
+    if env:
+        return env
+    base = os.path.dirname(os.path.abspath(__file__))
+    for p in (os.path.join(base, "config.yaml"), "config.yaml"):
+        if os.path.exists(p):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    text = f.read()
+                m = re.search(r'^\s*wecom_webhook\s*:\s*"?([^"\s]+)"?\s*$', text, re.M)
+                if m:
+                    return m.group(1)
+            except OSError:
+                pass
+    return None
+
+
+def send_wecom(webhook, contract, interval, fvgs):
+    """将某合约+周期的 FVG 列表推送为企业微信 markdown 消息（含周期与时间）。"""
+    title = f"**【FVG 信号】{contract} · {interval.upper()}**"
+    lines = [title, ""]
+    for f in fvgs:
+        arrow = "▲ 看涨" if f["type"] == "bullish" else "▼ 看跌"
+        lines.append(f"时间：<font color=\"warning\">{f['time']}</font>")
+        lines.append(f"方向：{arrow}")
+        lines.append(f"区间：[{f['bottom']}, {f['top']}]")
+        lines.append(f"缺口：{f['gap']}")
+        lines.append("---")
+    payload = {"msgtype": "markdown", "markdown": {"content": "\n".join(lines)}}
+    r = requests.post(webhook, json=payload, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
+
+def load_pushed_state():
+    """读取已推送 FVG 的去重状态（contract|interval|ts -> 1）。"""
+    base = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base, PUSHED_STATE_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_pushed_state(state):
+    """写入已推送 FVG 的去重状态。"""
+    base = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base, PUSHED_STATE_FILE)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
 def main():
     parser = argparse.ArgumentParser(description="FVG 信号的识别与检测 (Gate.io 数据源)")
     parser.add_argument("--contract", default="BTC_USDT", choices=CONTRACTS,
@@ -187,6 +251,12 @@ def main():
                         help="分析日 YYYY-MM-DD（北京时间），默认最近窗口")
     parser.add_argument("--min-gap", type=float, default=MIN_GAP,
                         help="gap 阈值，默认 1.0（0.x 小数不计）")
+    parser.add_argument("--push", action="store_true",
+                        help="命中 FVG 时推送企业微信（含周期与时间）")
+    parser.add_argument("--webhook", default=None,
+                        help="企业微信 webhook；默认按 WECOM_WEBHOOK 环境变量或 config.yaml 的 wecom_webhook")
+    parser.add_argument("--no-dedup", action="store_true",
+                        help="关闭推送去重（默认同一 FVG 只推送一次，防刷屏）")
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     args = parser.parse_args()
 
@@ -209,6 +279,38 @@ def main():
         window_start, window_end = get_window(now_bj)
 
     result = scan(args.contract, intervals, window_start, window_end, args.min_gap)
+
+    if args.push:
+        webhook = load_webhook(args.webhook)
+        if not webhook:
+            print("未找到企业微信 webhook（可用 --webhook 指定或设置 WECOM_WEBHOOK）",
+                  file=sys.stderr)
+            sys.exit(2)
+        state = load_pushed_state() if not args.no_dedup else {}
+        pushed_any = False
+        for interval in intervals:
+            info = result["intervals"].get(interval, {})
+            if "error" in info or not info.get("fvgs"):
+                continue
+            if not args.no_dedup:
+                fresh = [f for f in info["fvgs"]
+                         if state.get(f"{result['contract']}|{interval}|{f['time']}") is None]
+                if not fresh:
+                    print(f"[push] {result['contract']} {interval}: 无新 FVG，跳过（去重）")
+                    continue
+                fvgs_to_push = fresh
+            else:
+                fvgs_to_push = info["fvgs"]
+            resp = send_wecom(webhook, result["contract"], interval, fvgs_to_push)
+            print(f"[push] {result['contract']} {interval}: {resp}")
+            if not args.no_dedup:
+                for f in fvgs_to_push:
+                    state[f"{result['contract']}|{interval}|{f['time']}"] = 1
+            pushed_any = True
+        if not args.no_dedup:
+            save_pushed_state(state)
+        if not pushed_any:
+            print("[push] 本窗口无新 FVG，未推送")
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
