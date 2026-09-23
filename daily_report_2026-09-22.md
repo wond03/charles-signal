@@ -1,13 +1,21 @@
 📊 FVG 自动交易日报 · 2026-09-22
 
-BTC_USDT: 查询失败 400 Client Error: Bad Request for url: https://www.okx.com/api/v5/trade/orders-history?instId=BTC-USDT-SWAP&limit=100
-XAU_USDT: 查询失败 400 Client Error: Bad Request for url: https://www.okx.com/api/v5/trade/orders-history?instId=XAU-USDT-SWAP&limit=100
-**开单数**：0 笔
-**方向**：多 0 笔 / 空 0 笔
+**开单数**：7 笔
+**分品种**：BTC 4 / XAU 3
+**方向**：多 17 笔 / 空 5 笔
 **已平仓**：0 盈 / 0 亏
-**净盈亏**：<font color="info">+0.00 USDT</font>
+**净盈亏**：<font color="warning">-1.30 USDT</font>
 
 明细（平仓/有费用）：
-- 当日无已平仓记录（持仓中或未成交）
+- BTC ▼ None 净 -0.23
+- BTC ▲ None 净 -0.00
+- BTC ▲ None 净 -0.00
+- BTC ▲ None 净 -0.00
+- BTC ▲ None 净 -0.22
+- BTC ▼ None 净 -0.24
+- XAU ▲ None 净 -0.12
+- XAU ▼ None 净 -0.12
+- XAU ▼ None 净 -0.10
+- XAU ▼ None 净 -0.02
 
 > 模拟盘自动交易 · 森林查尔斯 FVG 策略
