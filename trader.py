@@ -21,6 +21,7 @@ FVG 信号自动交易模块（OKX Demo 模拟盘）
 """
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -70,7 +71,32 @@ def load_traded_state(base_dir):
         for k, v in d.items():
             if isinstance(k, str) and len(k.split("|")) == 3:
                 opened[k] = 1
-        return {"positions": {}, "opened_signals": opened}
+        # 从 daily_trades 账本补建 positions（每 合约|周期|方向 取最新一笔），
+        # 使单仓约束在旧状态迁移后立即生效；对账会随后修正已平仓位
+        positions = {}
+        for day_path in sorted(glob.glob(os.path.join(base_dir, "daily_trades_*.json"))):
+            try:
+                with open(day_path, encoding="utf-8") as f:
+                    rows = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(rows, list):
+                continue
+            for rec in rows:
+                c = rec.get("contract")
+                itv = rec.get("interval")
+                dr = rec.get("direction")
+                if not c or not itv or dr not in ("long", "short"):
+                    continue
+                pkey = f"{c}|{itv}|{dr}"
+                positions[pkey] = {
+                    "status": "open",
+                    "algo_id": str(rec.get("algo_id") or ""),
+                    "qty": rec.get("qty", 0),
+                    "time": rec.get("time", ""),
+                    "entry": rec.get("entry_ref", 0),
+                }
+        return {"positions": positions, "opened_signals": opened}
     positions = d.get("positions")
     opened = d.get("opened_signals")
     return {
