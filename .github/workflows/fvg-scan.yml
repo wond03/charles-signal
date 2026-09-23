@@ -86,6 +86,38 @@ jobs:
       - name: Install deps
         run: pip install requests
 
+      - name: Debug OKX orders endpoints
+        env:
+          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+          OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+          OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+        run: |
+          python3 - <<'PY'
+          import json, requests, time, base64, hashlib, hmac, os
+          KEY = os.environ["OKX_API_KEY"]; SEC = os.environ["OKX_API_SECRET"]; PAS = os.environ["OKX_API_PASSPHRASE"]
+          ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+          def req(path, params=None):
+              qs = ("?" + requests.compat.urlencode(params)) if params else ""
+              full = path + qs
+              msg = ts + "GET" + full
+              sign = base64.b64encode(hmac.new(SEC.encode(), msg.encode(), hashlib.sha256).digest()).decode()
+              h = {"OK-ACCESS-KEY": KEY, "OK-ACCESS-SIGN": sign, "OK-ACCESS-TIMESTAMP": ts,
+                   "OK-ACCESS-PASSPHRASE": PAS, "Content-Type": "application/json", "x-simulated-trading": "1"}
+              r = requests.get("https://www.okx.com" + full, headers=h, timeout=20)
+              try:
+                  j = r.json(); print(path, params, "->", r.status_code, (j.get("code"), j.get("msg")), "n=", len(j.get("data", [])))
+              except Exception:
+                  print(path, params, "->", r.status_code, r.text[:150])
+          req("/api/v5/trade/orders-history", {"instId": "BTC-USDT-SWAP"})
+          req("/api/v5/trade/orders-history", {"instId": "BTC-USDT-SWAP", "ordType": "market"})
+          req("/api/v5/trade/orders-history", {"instId": "BTC-USDT-SWAP", "state": "filled"})
+          req("/api/v5/trade/orders-history", {"instId": "BTC-USDT-SWAP", "after": "", "before": "", "limit": "20"})
+          req("/api/v5/trade/fills-history", {"instId": "BTC-USDT-SWAP"})
+          req("/api/v5/trade/fills", {"instId": "BTC-USDT-SWAP"})
+          req("/api/v5/trade/orders-algo-history", {"instId": "BTC-USDT-SWAP", "ordType": "oco"})
+          req("/api/v5/account/positions", {"instId": "BTC-USDT-SWAP"})
+          PY
+
       - name: Build & push daily report
         env:
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
