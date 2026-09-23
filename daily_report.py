@@ -164,11 +164,19 @@ def main():
     parser.add_argument("--push-webhook", action="store_true", help="推送到企业微信群机器人")
     parser.add_argument("--webhook", default=None, help="群机器人 webhook（覆盖配置）")
     parser.add_argument("--push-cli", action="store_true", help="通过 wecom-cli 直发授权真人")
+    parser.add_argument("--save-dir", default=None, help="将日报保存为 daily_report_<date>.md 到指定目录")
     args = parser.parse_args()
 
     day_str = args.date or datetime.now(BJ_TZ).strftime("%Y-%m-%d")
     text = build_report(day_str)
     print(text)
+
+    if args.save_dir:
+        os.makedirs(args.save_dir, exist_ok=True)
+        out_path = os.path.join(args.save_dir, f"daily_report_{day_str}.md")
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"[saved] {out_path}")
 
     sent = False
     if args.push_webhook:
