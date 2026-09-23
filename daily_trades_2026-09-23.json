@@ -1137,5 +1137,22 @@
     "ord_id": "3947757415051988992",
     "qty": 0.01,
     "algo_id": "3947757424693776384"
+  },
+  {
+    "time": "2026-09-23 17:35",
+    "ts": null,
+    "contract": "BTC_USDT",
+    "interval": "5m",
+    "type": "bearish",
+    "side": "sell",
+    "direction": "short",
+    "entry_ref": 85792.1,
+    "sl": 85850.8,
+    "tp": 85674.7,
+    "size_usdt": 5.0,
+    "leverage": 100,
+    "ord_id": "3947805433524555776",
+    "qty": 0.01,
+    "algo_id": "3947805448904151040"
   }
 ]
