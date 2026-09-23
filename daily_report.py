@@ -107,7 +107,7 @@ def build_report(day_str, dry=False):
             if pnl != 0 or fee != 0:
                 closed_rows.append({
                     "contract": contract, "side": side,
-                    "px": o.get("avgPx"), "pnl": pnl, "fee": fee, "net": net,
+                    "px": o.get("px") or o.get("avgPx"), "pnl": pnl, "fee": fee, "net": net,
                     "state": o.get("state"),
                 })
 
@@ -127,7 +127,7 @@ def build_report(day_str, dry=False):
             arrow = "▲" if r["side"] == "buy" else "▼"
             lines.append(f"- {r['contract'].replace('_USDT','')} {arrow} {r['px']} 净 {r['net']:+.2f}")
     lines.append("")
-    lines.append("> 模拟盘自动交易 · 森林查尔斯 FVG 策略")
+    lines.append("> 模拟盘自动交易 · FVG 策略")
     text = "\n".join(lines)
     if dry:
         text += "\n\n[DRY-RUN 未推送]"
