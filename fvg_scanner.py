@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -204,24 +205,36 @@ def load_webhook(explicit=None):
     return None
 
 
-def send_wecom(webhook, contract, interval, fvgs):
-    """每个 FVG 单独推送一条企业微信 markdown 消息（含周期与时间）。
-    返回各条推送的企业微信响应列表。
-    """
-    responses = []
-    for f in fvgs:
+def send_single(webhook, contract, interval, f):
+    """单个 FVG 推送一条企业微信 markdown 消息（含周期与时间）。"""
+    arrow = "▲ 看涨" if f["type"] == "bullish" else "▼ 看跌"
+    color = "info" if f["type"] == "bullish" else "comment"
+    content = (
+        f"# 🔔 FVG 信号 · {contract}\n\n"
+        f"**周期**：{interval.upper()}\n"
+        f"**时间**：<font color=\"warning\">{f['time']}</font>\n"
+        f"**方向**：<font color=\"{color}\">{arrow}</font>\n"
+        f"**区间**：`{f['bottom']} ~ {f['top']}`"
+    )
+    payload = {"msgtype": "markdown", "markdown": {"content": content}}
+    r = requests.post(webhook, json=payload, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
+
+def send_resonance(webhook, contract, time_str, items):
+    """多周期同一时间的 FVG 合并为一条共振消息（多周期共振）。"""
+    lines = [f"# ⚡ FVG 共振 · {contract}", "",
+             f"**时间**：<font color=\"warning\">{time_str}</font>", ""]
+    for interval, f in items:
         arrow = "▲ 看涨" if f["type"] == "bullish" else "▼ 看跌"
-        content = (
-            f"**【FVG 信号】{contract} · {interval.upper()}**\n\n"
-            f"时间：<font color=\"warning\">{f['time']}</font>\n"
-            f"方向：{arrow}\n"
-            f"区间：[{f['bottom']}, {f['top']}]"
-        )
-        payload = {"msgtype": "markdown", "markdown": {"content": content}}
-        r = requests.post(webhook, json=payload, timeout=TIMEOUT)
-        r.raise_for_status()
-        responses.append(r.json())
-    return responses
+        color = "info" if f["type"] == "bullish" else "comment"
+        lines.append(f"> **{interval.upper()}** <font color=\"{color}\">{arrow}</font> · `{f['bottom']} ~ {f['top']}`")
+    lines += ["", "多周期共振，信号增强"]
+    payload = {"msgtype": "markdown", "markdown": {"content": "\n".join(lines)}}
+    r = requests.post(webhook, json=payload, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.json()
 
 
 def load_pushed_state():
@@ -290,7 +303,8 @@ def main():
                   file=sys.stderr)
             sys.exit(2)
         state = load_pushed_state() if not args.no_dedup else {}
-        pushed_any = False
+        # 按时间收集待推送 FVG（先去重）：{时间: [(周期, fvg), ...]}
+        by_time = defaultdict(list)
         for interval in intervals:
             info = result["intervals"].get(interval, {})
             if "error" in info or not info.get("fvgs"):
@@ -298,17 +312,25 @@ def main():
             if not args.no_dedup:
                 fresh = [f for f in info["fvgs"]
                          if state.get(f"{result['contract']}|{interval}|{f['time']}") is None]
-                if not fresh:
-                    print(f"[push] {result['contract']} {interval}: 无新 FVG，跳过（去重）")
-                    continue
-                fvgs_to_push = fresh
             else:
-                fvgs_to_push = info["fvgs"]
-            resp = send_wecom(webhook, result["contract"], interval, fvgs_to_push)
-            ok = sum(1 for r in resp if isinstance(r, dict) and r.get("errcode") == 0)
-            print(f"[push] {result['contract']} {interval}: {len(resp)} 条, 成功 {ok}")
+                fresh = info["fvgs"]
+            for f in fresh:
+                by_time[f["time"]].append((interval, f))
+
+        pushed_any = False
+        for time_str in sorted(by_time):
+            items = by_time[time_str]
+            if len(items) >= 2:
+                resp = send_resonance(webhook, result["contract"], time_str, items)
+                ok = 1 if isinstance(resp, dict) and resp.get("errcode") == 0 else 0
+                print(f"[push] {result['contract']} {time_str}: 共振 {len(items)} 周期, 成功 {ok}")
+            else:
+                interval, f = items[0]
+                resp = send_single(webhook, result["contract"], interval, f)
+                ok = 1 if isinstance(resp, dict) and resp.get("errcode") == 0 else 0
+                print(f"[push] {result['contract']} {interval}: 1 条, 成功 {ok}")
             if not args.no_dedup:
-                for f in fvgs_to_push:
+                for interval, f in items:
                     state[f"{result['contract']}|{interval}|{f['time']}"] = 1
             pushed_any = True
         if not args.no_dedup:
