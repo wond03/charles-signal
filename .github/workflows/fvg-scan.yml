@@ -1,15 +1,16 @@
-name: FVG Scan & Push
+name: FVG Scan & Auto Trade
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # 每5分钟一次，5M 周期滞后 <= 1根K线
+    - cron: '*/5 * * * *'   # 每5分钟一次，5M 周期滞后 <= 1根K线（扫描+开单）
+    - cron: '10 16 * * *'   # 每日统计：UTC 16:10 = 北京次日 00:10（统计自然日）
   workflow_dispatch:        # 支持手动触发
 
 permissions:
-  contents: write           # 提交 .fvg_pushed.json 去重状态回仓库
+  contents: write           # 提交去重状态与交易记录回仓库
 
 jobs:
-  scan:
+  scan-trade:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,21 +22,52 @@ jobs:
       - name: Install deps
         run: pip install requests
 
-      - name: Scan FVG & push wecom
+      - name: Scan FVG, push wecom & auto trade (OKX demo)
         env:
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+          OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+          OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
         run: |
+          # 推送 FVG 信号
           python3 fvg_scanner.py --contract BTC_USDT --push || true
           python3 fvg_scanner.py --contract XAU_USDT --push || true
+          # 自动开单（不限制信号/次数/周期，BTC 100x / XAU 50x，5U/单，RR 1:2）
+          python3 trader.py --contract BTC_USDT --intervals 1h,15m,5m || true
+          python3 trader.py --contract XAU_USDT --intervals 1h,15m,5m || true
 
-      - name: Persist pushed dedup state
+      - name: Persist state (dedup + trade records)
         run: |
           git config user.name "marvis-bot"
           git config user.email "marvis-bot@users.noreply.github.com"
-          git add .fvg_pushed.json
+          git add .fvg_pushed.json .fvg_traded.json daily_trades_*.json
           if git diff --cached --quiet; then
             echo "no state change, skip commit"
           else
-            git commit -m "chore: update fvg pushed state [skip ci]"
+            git commit -m "chore: update fvg/trade state [skip ci]"
             git push
           fi
+
+  daily-report:
+    runs-on: ubuntu-latest
+    needs: [scan-trade]
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Build & push daily report
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+          OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+          OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+        run: |
+          # 统计北京时间昨日自然日并推送群机器人
+          python3 daily_report.py --date "$(TZ=Asia/Shanghai date -d 'yesterday' +%Y-%m-%d)" --push-webhook || true
