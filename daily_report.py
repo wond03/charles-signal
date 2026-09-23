@@ -364,6 +364,28 @@ def build_report(day_str, dry=False, base_dir=".", compact=False):
     for r in reso_list:
         combo_stat[r["combo"]] = combo_stat.get(r["combo"], 0) + 1
 
+    # ---- 共振组合平仓统计：ord_id -> trade -> 共振组 -> combo ----
+    trade_by_ord = {t.get("ord_id"): t for t in trades if t.get("ord_id")}
+    reso_closed_stats = {}
+    for c in closed:
+        t = trade_by_ord.get(c["ord_id"])
+        if not t:
+            continue
+        key = (t.get("contract"), t.get("direction") or t.get("side"))
+        g = reso_groups.get(key)
+        if not g or len(g["intervals"]) < 2:
+            continue
+        ivs = sorted(g["intervals"], key=lambda x: {"5m": 0, "15m": 1, "1h": 2, "4h": 3}.get(x, 9))
+        combo = "+".join(iv.upper() for iv in ivs)
+        st = reso_closed_stats.setdefault(combo, {"n": 0, "wins": 0, "losses": 0, "realized": 0.0, "fee": 0.0})
+        st["n"] += 1
+        if c["pnl"] > 0:
+            st["wins"] += 1
+        elif c["pnl"] < 0:
+            st["losses"] += 1
+        st["realized"] += c["pnl"]
+        st["fee"] += c["fee"]
+
     # ---- 运行时长：今日最早信号/开单 -> 现在 ----
     run_hours = None
     t_min = None
@@ -408,6 +430,67 @@ def build_report(day_str, dry=False, base_dir=".", compact=False):
             avg_hold_h = sum(hold_ts) / len(hold_ts)
 
     # ================= 输出 =================
+    if compact:
+        # ===== 新版精简模板（老板指定）=====
+        lines = []
+        lines.append("📊 FVG 自动交易数据·最近24H")
+        lines.append("━━━━━━━━━━━━")
+        lines.append("")
+
+        # 账户概览
+        lines.append("账户概览")
+        if isinstance(acct, dict) and acct and not acct.get("__error__"):
+            init_approx = acct["totalEq"] - net - upl
+            ret = (net + upl) / init_approx if init_approx else 0.0
+            pf = metrics.get("profit_factor") if metrics.get("sample") else None
+            pf_s = f"{pf:.2f}" if pf else "N/A"
+            lines.append(f"总盈亏 {net + upl:+.2f} | 总笔数 {n_open} | 收益率 {ret * 100:+.2f}% | 盈亏比 {pf_s}")
+        else:
+            lines.append(f"账户接口不可用：{acct if acct else 'balance 无返回'}")
+        lines.append("")
+
+        # 分周期绩效
+        lines.append("分周期绩效")
+        iv_order = {"5m": "5M", "15m": "15M", "1h": "1H", "4h": "4H"}
+        for iv in ("5m", "15m", "1h"):
+            p = period_perf.get(iv, {"open": 0, "long": 0, "short": 0,
+                                     "closed": 0, "realized": 0.0, "fee": 0.0, "wins": 0})
+            pnet = p["realized"] + p["fee"]
+            losses = p["closed"] - p["wins"]
+            wr = (p["wins"] / p["closed"] * 100) if p["closed"] else 0.0
+            lines.append(f"{iv_order[iv]} 总笔数 {p['open']} | 胜负 {p['wins']}/{losses} | "
+                         f"盈亏 {pnet:+.2f} | 胜率 {wr:.0f}%")
+        lines.append("")
+
+        # 共振组合分布
+        lines.append("共振组合分布")
+        reso_pos_stat = {}
+        for r in reso_list:
+            st = reso_pos_stat.setdefault(r["combo"], {"n": 0, "pnl": 0.0})
+            st["n"] += 1
+            st["pnl"] += r["pnl"] or 0.0
+        for combo in ("5M+15M", "15M+1H", "5M+1H"):
+            pos_st = reso_pos_stat.get(combo, {"n": 0, "pnl": 0.0})
+            cst = reso_closed_stats.get(combo, {"n": 0, "wins": 0, "losses": 0,
+                                                "realized": 0.0, "fee": 0.0})
+            total_n = cst["n"] + pos_st["n"]
+            wins = cst["wins"]
+            losses = cst["losses"]
+            pnl = cst["realized"] + cst["fee"] + pos_st["pnl"]
+            wr = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
+            if total_n == 0:
+                lines.append(f"{combo} 0笔 | 胜负 -/- | 盈亏 - | 胜率 -")
+            else:
+                lines.append(f"{combo} {total_n}笔 | 胜负 {wins}/{losses} | 盈亏 {pnl:+.2f} | 胜率 {wr:.0f}%")
+        lines.append("")
+
+        # 盈亏拆解
+        lines.append("盈亏拆解")
+        lines.append(f"已实现：{realized:+.2f} | 未实现：{upl:+.2f}")
+        lines.append(f"手续费：{fees:+.2f} | 资金费：0.00")
+        lines.append(f"净盈亏：{net:+.2f} USDT")
+        return "\n".join(lines)
+
     lines = []
     lines.append("📊 FVG 自动交易数据·最近24H")
     lines.append("━━━━━━━━━━━━")
@@ -650,3 +733,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
