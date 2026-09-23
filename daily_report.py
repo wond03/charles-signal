@@ -145,7 +145,8 @@ def load_fvg_pushed_window(win_start, win_end, base_dir="."):
 
 
 def fetch_fills(contract, begin_ms, end_ms):
-    """拉 OKX 当日成交（demo fills 可用），本地按时间过滤，返回升序列表。"""
+    """拉 OKX 当日成交（demo fills 可用），本地按时间过滤，返回升序列表。
+    注意：fills 的 pnl 字段恒为 0，真实已实现盈亏需从 bills(type=2) 获取。"""
     inst_okx = _INST_OKX.get(contract, contract)
     data = okx_exec._private_request("GET", "/api/v5/trade/fills",
                                      params={"instType": "SWAP", "instId": inst_okx, "limit": "100"})
@@ -157,6 +158,35 @@ def fetch_fills(contract, begin_ms, end_ms):
             continue
         if begin_ms <= ts < end_ms:
             out.append(o)
+    out.sort(key=lambda x: int(x.get("ts") or 0))
+    return out
+
+
+def fetch_bills(contract, begin_ms, end_ms, max_pages=3):
+    """拉 OKX 账单平仓记录（/api/v5/account/bills, type=2），返回升序列表。
+    真实已实现盈亏在 pnl 字段、手续费在 fee 字段；按 begin/end 窗口分页拉取。"""
+    inst_okx = _INST_OKX.get(contract, contract)
+    out, after = [], ""
+    for _ in range(max_pages):
+        params = {"instType": "SWAP", "instId": inst_okx,
+                  "begin": str(begin_ms), "end": str(end_ms),
+                  "type": "2", "limit": "100"}
+        if after:
+            params["after"] = after
+        data = okx_exec._private_request("GET", "/api/v5/account/bills", params=params)
+        rows = data.get("data", [])
+        for o in rows:
+            try:
+                ts = int(o.get("ts") or 0)
+            except (TypeError, ValueError):
+                continue
+            if begin_ms <= ts < end_ms:
+                out.append(o)
+        if len(rows) < 100:
+            break
+        after = rows[-1].get("billId", "")
+        if not after:
+            break
     out.sort(key=lambda x: int(x.get("ts") or 0))
     return out
 
@@ -238,6 +268,66 @@ def _aggregate_closed(fills):
     return closed
 
 
+def _aggregate_closed_from_bills(bills, trades):
+    """基于 bills(type=2 平仓) 聚合为订单级记录（真实 pnl/fee）。
+    平仓单 ordId 与开仓单不同：按 instId+方向+时间最近匹配回开仓单，
+    补齐 interval/direction 供分周期×方向统计。匹配失败的保留为平仓记录。"""
+    # 开仓单按合约+方向分组，各维护按时间排序的待匹配队列
+    trade_queues = {}
+    for t in trades:
+        if not t.get("ord_id"):
+            continue
+        key = (t.get("contract"), t.get("direction") or t.get("side"))
+        trade_queues.setdefault(key, []).append(t)
+    for q in trade_queues.values():
+        q.sort(key=lambda x: x.get("time") or "")
+    used = set()
+    inst_contract = {v: k for k, v in _INST_OKX.items()}
+    closed = []
+    for b in bills:
+        inst = b.get("instId", "")
+        contract = inst_contract.get(inst, inst)
+        sub = str(b.get("subType") or "")
+        # subType: 201/202 平多(long)  204/205 平空(short)
+        if sub in ("204", "205"):
+            direction = "short"
+        else:
+            direction = "long"
+        try:
+            ts = int(b.get("ts") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        # FIFO 匹配：同合约同方向中最早开仓（且已到平仓时间）的未用开仓单
+        matched = None
+        for t in trade_queues.get((contract, direction), []):
+            if t.get("ord_id") in used:
+                continue
+            try:
+                open_dt = datetime.strptime(t["time"], "%Y-%m-%d %H:%M").replace(tzinfo=BJ_TZ)
+                open_ms = int(open_dt.timestamp() * 1000)
+            except (ValueError, KeyError, TypeError):
+                continue
+            if open_ms <= ts:
+                matched = t
+                break
+        side = "sell" if direction == "short" else "buy"
+        pnl = float(b.get("pnl") or 0.0)
+        fee = float(b.get("fee") or 0.0)
+        rec = {"ord_id": b.get("ordId") or "?",
+               "side": side, "direction": direction,
+               "interval": (matched or {}).get("interval") or "?",
+               "contract": contract,
+               "px": b.get("px"), "ts": b.get("ts"),
+               "pnl": pnl, "fee": fee, "net": pnl + fee}
+        if matched:
+            used.add(matched["ord_id"])
+            rec["ord_id"] = matched["ord_id"]
+            rec["open_time"] = matched.get("time")
+        closed.append(rec)
+    closed.sort(key=lambda x: int(x.get("ts") or 0))
+    return closed
+
+
 def _fmt_ts(ts_ms):
     if not ts_ms:
         return "-"
@@ -313,10 +403,16 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
         trades = load_daily_trades(day_str, base_dir)
         fvg_keys = load_fvg_pushed(day_str, base_dir)
     fills_all = []
+    bills_all = []
     for contract in _INST_OKX:
-        r = _safe(lambda c=contract: fetch_fills(c, begin_ms, end_ms), None)
+        r = _safe(lambda c=contract: fetch_bills(c, begin_ms, end_ms), None)
         if isinstance(r, list):
-            fills_all.extend(r)
+            bills_all.extend(r)
+        else:
+            warn.append(f"bills {contract} 查询失败")
+        f = _safe(lambda c=contract: fetch_fills(c, begin_ms, end_ms), None)
+        if isinstance(f, list):
+            fills_all.extend(f)
         else:
             warn.append(f"fills {contract} 查询失败")
     fills_all.sort(key=lambda x: int(x.get("ts") or 0))
@@ -328,7 +424,7 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
     # ---- 基础计算 ----
     open_oids = {t.get("ord_id") for t in trades if t.get("ord_id")}
     n_open = len(open_oids)
-    closed = _aggregate_closed(fills_all)
+    closed = _aggregate_closed_from_bills(bills_all, trades)
     closed_traded = [c for c in closed if c["pnl"] != 0]
     realized = sum(c["pnl"] for c in closed)
     fees = sum(float(o.get("fee") or 0.0) for o in fills_all)
@@ -360,32 +456,35 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
             period_open[iv]["short"] += 1
     metrics = compute_metrics(closed_traded)
 
-    # ---- 分周期绩效：关联 fills 的 ordId -> daily_trades interval ----
-    ord_iv = {t.get("ord_id"): (t.get("interval") or "?") for t in trades if t.get("ord_id")}
-    period_perf = {}
+    # ---- 分周期×方向绩效：closed 已带 interval/direction，逐维统计 ----
+    period_perf = {}   # iv -> {"open": n, "long": n, "short": n, "dir": {dir -> stats}}
     for iv in period_open:
         period_perf[iv] = {"open": period_open[iv]["open"],
                            "long": period_open[iv]["long"],
                            "short": period_open[iv]["short"],
-                           "closed": 0, "realized": 0.0, "fee": 0.0, "wins": 0}
+                           "dir": {}}
     for c in closed:
-        iv = ord_iv.get(c["ord_id"])
-        if iv is None:
-            continue
-        p = period_perf.setdefault(iv, {"open": 0, "long": 0, "short": 0,
-                                        "closed": 0, "realized": 0.0, "fee": 0.0, "wins": 0})
-        p["realized"] += c["pnl"]
-        p["fee"] += c["fee"]
+        iv = c.get("interval") or "?"
+        d = c.get("direction") or "?"
+        p = period_perf.setdefault(iv, {"open": 0, "long": 0, "short": 0, "dir": {}})
+        st = p["dir"].setdefault(d, {"closed": 0, "wins": 0, "losses": 0,
+                                     "realized": 0.0, "fee": 0.0})
+        st["realized"] += c["pnl"]
+        st["fee"] += c["fee"]
         if c["pnl"] != 0:
-            p["closed"] += 1
+            st["closed"] += 1
             if c["pnl"] > 0:
-                p["wins"] += 1
+                st["wins"] += 1
+            else:
+                st["losses"] += 1
 
-    # ---- 多周期共振：按 (contract, direction) 聚合开单周期集合 ----
+    # ---- 多周期共振：同一合约+方向+开单时刻(分钟级)聚合周期集合 ----
+    # 避免按 (contract, direction) 全量聚合导致周期虚高（如全天 5m 单混入三周期）
     reso_groups = {}
     for t in trades:
-        key = (t.get("contract"), t.get("direction") or t.get("side"))
+        key = (t.get("contract"), t.get("direction") or t.get("side"), t.get("time"))
         g = reso_groups.setdefault(key, {"contract": t.get("contract"), "dir": key[1],
+                                         "time": t.get("time"),
                                          "intervals": set(), "entries": [],
                                          "last_time": t.get("time"), "n": 0})
         g["intervals"].add(t.get("interval"))
@@ -401,7 +500,7 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
         pos_map.setdefault((inst, side), []).append(p)
     inst_contract = {v: k for k, v in _INST_OKX.items()}
     reso_list = []
-    for (contract, dirn), g in sorted(reso_groups.items()):
+    for (contract, dirn, _tm), g in sorted(reso_groups.items()):
         if len(g["intervals"]) < 2:
             continue
         inst = _INST_OKX.get(contract, contract)
@@ -424,14 +523,13 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
     for r in reso_list:
         combo_stat[r["combo"]] = combo_stat.get(r["combo"], 0) + 1
 
-    # ---- 共振组合平仓统计：ord_id -> trade -> 共振组 -> combo ----
-    trade_by_ord = {t.get("ord_id"): t for t in trades if t.get("ord_id")}
+    # ---- 共振组合平仓统计：closed(带 interval/direction/open_time) -> reso 组 -> combo ----
     reso_closed_stats = {}
     for c in closed:
-        t = trade_by_ord.get(c["ord_id"])
-        if not t:
+        if c.get("interval") == "?" or not c.get("open_time"):
             continue
-        key = (t.get("contract"), t.get("direction") or t.get("side"))
+        # 找包含该开仓单所属周期集合的共振组：合约+方向+开仓时刻一致
+        key = (c.get("contract"), c.get("direction"), c.get("open_time"))
         g = reso_groups.get(key)
         if not g or len(g["intervals"]) < 2:
             continue
@@ -509,17 +607,21 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
             lines.append(f"账户接口不可用：{acct if acct else 'balance 无返回'}")
         lines.append("")
 
-        # 分周期绩效
-        lines.append("分周期绩效")
+        # 分周期×方向绩效
+        lines.append("分周期绩效（多/空）")
         iv_order = {"5m": "5M", "15m": "15M", "1h": "1H", "4h": "4H"}
         for iv in ("5m", "15m", "1h"):
-            p = period_perf.get(iv, {"open": 0, "long": 0, "short": 0,
-                                     "closed": 0, "realized": 0.0, "fee": 0.0, "wins": 0})
-            pnet = p["realized"] + p["fee"]
-            losses = p["closed"] - p["wins"]
-            wr = (p["wins"] / p["closed"] * 100) if p["closed"] else 0.0
-            lines.append(f"{iv_order[iv]} 总笔数 {p['open']} | 胜负 {p['wins']}/{losses} | "
-                         f"盈亏 {pnet:+.2f} | 胜率 {wr:.0f}%")
+            p = period_perf.get(iv, {"open": 0, "long": 0, "short": 0, "dir": {}})
+            segs = []
+            for d in ("long", "short"):
+                st = p["dir"].get(d, {"closed": 0, "wins": 0, "losses": 0,
+                                      "realized": 0.0, "fee": 0.0})
+                losses = st["losses"]
+                wr = (st["wins"] / st["closed"] * 100) if st["closed"] else 0.0
+                pnet = st["realized"] + st["fee"]
+                d_cn = "多" if d == "long" else "空"
+                segs.append(f"{d_cn}{st['closed']}笔 胜{st['wins']}/{losses} {pnet:+.2f}U {wr:.0f}%")
+            lines.append(f"{iv_order[iv]} 开{p['open']} | " + " | ".join(segs))
         lines.append("")
 
         # 共振组合分布
@@ -600,15 +702,20 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
                  + "  |  多 " + str(dir_stat.get("buy", 0)) + " / 空 " + str(dir_stat.get("sell", 0)))
     lines.append("")
 
-    # 三、分周期绩效
-    lines.append("三、分周期绩效")
+    # 三、分周期×方向绩效
+    lines.append("三、分周期绩效（多/空）")
     iv_order = {"5m": "5M", "15m": "15M", "1h": "1H", "4h": "4H"}
     for iv in sorted(period_perf, key=lambda x: {"5m": 0, "15m": 1, "1h": 2, "4h": 3}.get(x, 9)):
         p = period_perf[iv]
-        pnet = p["realized"] + p["fee"]
-        wr = (p["wins"] / p["closed"] * 100) if p["closed"] else 0.0
-        lines.append(f"• {iv_order.get(iv, iv.upper())} ：开 {p['open']} | 平 {p['closed']} | "
-                     f"多 {p['long']} / 空 {p['short']} | 净 {pnet:+.2f} | 胜率 {wr:.0f}%")
+        lines.append(f"• {iv_order.get(iv, iv.upper())} ：开 {p['open']}（多 {p['long']} / 空 {p['short']}）")
+        for d in ("long", "short"):
+            st = p["dir"].get(d, {"closed": 0, "wins": 0, "losses": 0,
+                                  "realized": 0.0, "fee": 0.0})
+            pnet = st["realized"] + st["fee"]
+            wr = (st["wins"] / st["closed"] * 100) if st["closed"] else 0.0
+            d_cn = "多" if d == "long" else "空"
+            lines.append(f"   {d_cn}：平 {st['closed']} | 胜 {st['wins']} / 负 {st['losses']} | "
+                         f"胜率 {wr:.0f}% | 盈亏 {pnet:+.2f}")
     # 共振
     lines.append("⚡ 多周期共振" + ("（详细）" if n_reso else ""))
     lines.append(f"📌 今日共 {n_reso} 笔共振")
