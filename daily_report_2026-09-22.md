@@ -4,7 +4,7 @@
 **分品种**：BTC 4 / XAU 3
 **方向**：多 3 笔 / 空 4 笔
 **已平仓**：0 盈 / 0 亏
-**净盈亏**：<font color="warning">-1.30 USDT</font>
+**净盈亏**：<font color="warning">-1.27 USDT</font>
 
 明细（平仓/有费用）：
 - BTC ▼ None 净 -0.23
