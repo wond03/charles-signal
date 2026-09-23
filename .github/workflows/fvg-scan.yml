@@ -120,13 +120,12 @@ jobs:
 
       - name: Build & push daily report
         env:
-          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
           OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
           OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
         run: |
-          # 统计北京时间昨日自然日并推送群机器人；日报同时落盘供本地 CLI 直发
-          python3 daily_report.py --date "$(TZ=Asia/Shanghai date -d 'yesterday' +%Y-%m-%d)" --push-webhook --save-dir . || true
+          # 统计北京时间昨日自然日，日报落盘供本地 CLI 直发个人（不再群发）
+          python3 daily_report.py --date "$(TZ=Asia/Shanghai date -d 'yesterday' +%Y-%m-%d)" --save-dir . || true
 
       - name: Persist daily report
         run: |
