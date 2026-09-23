@@ -205,19 +205,23 @@ def load_webhook(explicit=None):
 
 
 def send_wecom(webhook, contract, interval, fvgs):
-    """将某合约+周期的 FVG 列表推送为企业微信 markdown 消息（含周期与时间）。"""
-    title = f"**【FVG 信号】{contract} · {interval.upper()}**"
-    lines = [title, ""]
+    """每个 FVG 单独推送一条企业微信 markdown 消息（含周期与时间）。
+    返回各条推送的企业微信响应列表。
+    """
+    responses = []
     for f in fvgs:
         arrow = "▲ 看涨" if f["type"] == "bullish" else "▼ 看跌"
-        lines.append(f"时间：<font color=\"warning\">{f['time']}</font>")
-        lines.append(f"方向：{arrow}")
-        lines.append(f"区间：[{f['bottom']}, {f['top']}]")
-        lines.append("---")
-    payload = {"msgtype": "markdown", "markdown": {"content": "\n".join(lines)}}
-    r = requests.post(webhook, json=payload, timeout=TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+        content = (
+            f"**【FVG 信号】{contract} · {interval.upper()}**\n\n"
+            f"时间：<font color=\"warning\">{f['time']}</font>\n"
+            f"方向：{arrow}\n"
+            f"区间：[{f['bottom']}, {f['top']}]"
+        )
+        payload = {"msgtype": "markdown", "markdown": {"content": content}}
+        r = requests.post(webhook, json=payload, timeout=TIMEOUT)
+        r.raise_for_status()
+        responses.append(r.json())
+    return responses
 
 
 def load_pushed_state():
@@ -301,7 +305,8 @@ def main():
             else:
                 fvgs_to_push = info["fvgs"]
             resp = send_wecom(webhook, result["contract"], interval, fvgs_to_push)
-            print(f"[push] {result['contract']} {interval}: {resp}")
+            ok = sum(1 for r in resp if isinstance(r, dict) and r.get("errcode") == 0)
+            print(f"[push] {result['contract']} {interval}: {len(resp)} 条, 成功 {ok}")
             if not args.no_dedup:
                 for f in fvgs_to_push:
                     state[f"{result['contract']}|{interval}|{f['time']}"] = 1
