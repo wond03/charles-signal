@@ -373,7 +373,7 @@ def send_single(webhook, contract, interval, f, entry_price):
     content = (
         f"🔔 {contract}\n\n"
         f"时间：<font color=\"comment\">{f['time']}（UTC+8）</font>\n"
-        f"周期：{interval.upper()} ｜ 方向：<font color=\"{color}\">{arrow}</font> ｜ 状态：已触发\n"
+        f"周期：{interval.upper()} ｜ 方向：<font color=\"{color}\">{arrow}</font> ｜ 状态：已触发（待自动开单）\n"
         f"区间：`{f['bottom']} ~ {f['top']}`"
         + open_tpl_block(contract, f, entry_price)
     )
@@ -391,7 +391,7 @@ def send_resonance(webhook, contract, time_str, items, entry_price):
     itv_str = "+".join(itv.upper() for itv, _ in items)
     lines = [f"⚡ {contract} 共振", "",
              f"时间：<font color=\"comment\">{time_str}（UTC+8）</font>",
-             f"周期：{itv_str} ｜ 方向：<font color=\"{color}\">{arrow}</font> ｜ 状态：已触发",
+             f"周期：{itv_str} ｜ 方向：<font color=\"{color}\">{arrow}</font> ｜ 状态：已触发（待自动开单）",
              "区间："]
     for interval, f in items:
         fcolor = _color_for(f)
