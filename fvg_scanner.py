@@ -39,6 +39,11 @@ INTERVALS = ("1h", "15m", "5m")
 CONTRACTS = ("BTC_USDT", "XAU_USDT")
 MIN_GAP = 1.0  # gap 阈值：>=1 才算，0.x 小数不算
 
+# ===== 开仓模板（与 trader.py 保持一致）=====
+LEVERAGE = {"BTC_USDT": 100, "XAU_USDT": 50}   # BTC 100x / XAU 50x
+TRADE_SIZE_USDT = 5.0                          # 单笔固定 5U
+RR = 2.0                                       # 盈亏比 1:2（TP = 2 × SL）
+
 
 def fetch_klines(contract, interval, limit=1000, to_ts=None):
     """拉取 Gate.io 永续K线，返回按时间升序的列表。"""
@@ -210,8 +215,52 @@ def _color_for(f):
     return "info" if f["type"] == "bullish" else "warning"
 
 
-def send_single(webhook, contract, interval, f):
-    """单个 FVG 推送一条企业微信 markdown 消息（含周期与时间）。"""
+def compute_sltp(entry_price, fvg_type, bottom, top):
+    """与 trader.py 一致：SL=缺口边界，TP = entry ± RR×SL距离。"""
+    if fvg_type == "bullish":
+        sl = bottom
+        sl_dist = entry_price - sl
+        if sl_dist <= 0:
+            sl_dist = abs(entry_price - bottom) or entry_price * 0.001
+            sl = entry_price - sl_dist
+        tp = entry_price + RR * sl_dist
+        return round(sl, 4), round(tp, 4)
+    sl = top
+    sl_dist = sl - entry_price
+    if sl_dist <= 0:
+        sl_dist = abs(top - entry_price) or entry_price * 0.001
+        sl = entry_price + sl_dist
+    tp = entry_price - RR * sl_dist
+    return round(sl, 4), round(tp, 4)
+
+
+def latest_price(contract):
+    """取最新 1m 收盘价作为开仓参考价（Gate.io），失败返回 None。"""
+    try:
+        klines = fetch_klines(contract, "1m", limit=1)
+        if klines:
+            return float(klines[-1]["close"])
+    except Exception:
+        pass
+    return None
+
+
+def open_tpl_block(contract, f, entry_price):
+    """开仓模板 markdown 区块（杠杆/单笔/SL/TP，与 trader.py 参数一致）。"""
+    lev = LEVERAGE.get(contract, 100)
+    sl, tp = compute_sltp(entry_price, f["type"], f["bottom"], f["top"])
+    side = "多" if f["type"] == "bullish" else "空"
+    return (
+        "\n────────────\n"
+        f"**开仓模板**：{contract} · {side} {lev}x · 单笔 {TRADE_SIZE_USDT:.0f}U\n"
+        f"**入场参考**：<font color=\"comment\">{entry_price:.4f}</font>（最新价）\n"
+        f"**止损**：<font color=\"warning\">{sl}</font>\n"
+        f"**止盈**：<font color=\"info\">{tp}</font>（RR 1:{RR:.0f}）"
+    )
+
+
+def send_single(webhook, contract, interval, f, entry_price):
+    """单个 FVG 推送一条企业微信 markdown 消息（含周期、时间、开仓模板）。"""
     arrow = "▲ 看涨" if f["type"] == "bullish" else "▼ 看跌"
     color = _color_for(f)
     content = (
@@ -220,6 +269,7 @@ def send_single(webhook, contract, interval, f):
         f"**时间**：<font color=\"comment\">{f['time']}</font>\n"
         f"**方向**：<font color=\"{color}\">{arrow}</font>\n"
         f"**区间**：`{f['bottom']} ~ {f['top']}`"
+        + open_tpl_block(contract, f, entry_price)
     )
     payload = {"msgtype": "markdown", "markdown": {"content": content}}
     r = requests.post(webhook, json=payload, timeout=TIMEOUT)
@@ -227,7 +277,7 @@ def send_single(webhook, contract, interval, f):
     return r.json()
 
 
-def send_resonance(webhook, contract, time_str, items):
+def send_resonance(webhook, contract, time_str, items, entry_price):
     """多周期同一时间的 FVG 合并为一条共振消息（多周期共振）。"""
     lines = [f"# ⚡ FVG 共振 · {contract}", "",
              f"**时间**：<font color=\"comment\">{time_str}</font>", ""]
@@ -236,6 +286,7 @@ def send_resonance(webhook, contract, time_str, items):
         color = _color_for(f)
         lines.append(f"> **{interval.upper()}** <font color=\"{color}\">{arrow}</font> · `{f['bottom']} ~ {f['top']}`")
     lines += ["", "多周期共振，信号增强"]
+    lines.append(open_tpl_block(contract, items[0][1], entry_price))
     payload = {"msgtype": "markdown", "markdown": {"content": "\n".join(lines)}}
     r = requests.post(webhook, json=payload, timeout=TIMEOUT)
     r.raise_for_status()
@@ -323,15 +374,16 @@ def main():
                 by_time[f["time"]].append((interval, f))
 
         pushed_any = False
+        entry_price = latest_price(result["contract"]) or 0.0
         for time_str in sorted(by_time):
             items = by_time[time_str]
             if len(items) >= 2:
-                resp = send_resonance(webhook, result["contract"], time_str, items)
+                resp = send_resonance(webhook, result["contract"], time_str, items, entry_price)
                 ok = 1 if isinstance(resp, dict) and resp.get("errcode") == 0 else 0
                 print(f"[push] {result['contract']} {time_str}: 共振 {len(items)} 周期, 成功 {ok}")
             else:
                 interval, f = items[0]
-                resp = send_single(webhook, result["contract"], interval, f)
+                resp = send_single(webhook, result["contract"], interval, f, entry_price)
                 ok = 1 if isinstance(resp, dict) and resp.get("errcode") == 0 else 0
                 print(f"[push] {result['contract']} {interval}: 1 条, 成功 {ok}")
             if not args.no_dedup:
