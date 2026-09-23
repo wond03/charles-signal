@@ -1375,5 +1375,39 @@
     "ord_id": "3948106486908358656",
     "qty": 58.0,
     "algo_id": "3948106853267312640"
+  },
+  {
+    "time": "2026-09-23 20:15",
+    "ts": null,
+    "contract": "XAU_USDT",
+    "interval": "15m",
+    "type": "bullish",
+    "side": "buy",
+    "direction": "long",
+    "entry_ref": 4321.5,
+    "sl": 4315.77,
+    "tp": 4332.96,
+    "size_usdt": 5.0,
+    "leverage": 50,
+    "ord_id": "3948128059589562368",
+    "qty": 58.0,
+    "algo_id": "3948128089733107712"
+  },
+  {
+    "time": "2026-09-23 20:15",
+    "ts": null,
+    "contract": "XAU_USDT",
+    "interval": "5m",
+    "type": "bullish",
+    "side": "buy",
+    "direction": "long",
+    "entry_ref": 4320.9,
+    "sl": 4320.88,
+    "tp": 4320.94,
+    "size_usdt": 5.0,
+    "leverage": 50,
+    "ord_id": "3948128166930190336",
+    "qty": 58.0,
+    "algo_id": ""
   }
 ]
