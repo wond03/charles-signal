@@ -4,11 +4,12 @@
 FVG 信号自动交易模块（OKX Demo 模拟盘）
 ========================================
 策略规则（按老板设定）：
-  - 每次扫描出的 FVG 信号都开单，不限制信号数、不限制交易次数、不限制周期
+  - 每次扫描出的 FVG 信号都开单，不限制信号数、不限制交易次数
+  - 单仓约束：同一币种 + 同一方向 + 同一周期，已有未平仓则跳过新信号（平仓后可再开）
   - 杠杆：BTC 100x / XAU 50x
   - 盈亏比 1:2（TP 距离 = 2 × SL 距离）
   - 固定每次下单金额 5U
-  - 止盈止损用 OKX OCO 算法单（交易所端触发）
+  - 止盈止损用 OKX OCO 算法单（交易所端触发，OCO 数量=本次开仓量，各仓独立管理）
 
 用法:
   python3 trader.py --contract BTC_USDT --intervals 1h,15m,5m --trade
@@ -34,7 +35,8 @@ import okx_exec
 TRADE_SIZE_USDT = 5.0          # 每次固定 5U
 LEVERAGE = {"BTC_USDT": 100, "XAU_USDT": 50}   # BTC 100x / XAU 50x
 RR = 2.0                       # 盈亏比 1:2（TP = 2 × SL）
-TRADED_STATE_FILE = ".fvg_traded.json"  # 已开单去重状态
+MIN_SL_PCT = 0.003             # 最小止损距离（入场价的 0.3%），防止 FVG 过窄导致扫损
+TRADED_STATE_FILE = ".fvg_traded.json"  # 持仓/已开单状态（单仓约束去重）
 
 BJ_TZ = timezone(timedelta(hours=8))
 
@@ -42,13 +44,39 @@ _INST_OKX = {"BTC_USDT": "BTC-USDT-SWAP", "XAU_USDT": "XAU-USDT-SWAP"}
 
 
 def load_traded_state(base_dir):
+    """读取状态文件（含旧格式自动迁移）。
+
+    新格式:
+      {
+        "positions": {
+          "合约|周期|方向": {"status": "open", "algo_id": "...", "qty": 0.59,
+                          "time": "2026-09-23 20:05", "entry": 85492.8}
+        },
+        "opened_signals": {"合约|周期|时间": 1}
+      }
+    旧格式（仅时间去重）: {"合约|周期|时间": 1}
+    """
     path = os.path.join(base_dir, TRADED_STATE_FILE)
     try:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
-            return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
-        return {}
+        return {"positions": {}, "opened_signals": {}}
+    if not isinstance(d, dict):
+        return {"positions": {}, "opened_signals": {}}
+    # 旧格式迁移：v==1 且 key 为 合约|周期|时间（无 positions 结构）
+    if "positions" not in d:
+        opened = {}
+        for k, v in d.items():
+            if isinstance(k, str) and len(k.split("|")) == 3:
+                opened[k] = 1
+        return {"positions": {}, "opened_signals": opened}
+    positions = d.get("positions")
+    opened = d.get("opened_signals")
+    return {
+        "positions": positions if isinstance(positions, dict) else {},
+        "opened_signals": opened if isinstance(opened, dict) else {},
+    }
 
 
 def save_traded_state(base_dir, state):
@@ -76,16 +104,21 @@ def record_trade(base_dir, rec):
     return path
 
 
-def compute_sltp(entry_price, fvg_type, bottom, top):
+def compute_sltp(entry_price, fvg_type, bottom, top, min_sl_pct=MIN_SL_PCT):
     """按盈亏比 1:2 计算止盈止损价。
     看涨（多单）：止损在缺口下沿 bottom 下方；看跌（空单）：止损在缺口上沿 top 上方。
     SL 距离 = 缺口边界到入场价距离；TP = 入场 ± 2 × SL 距离。
+    若缺口过窄（SL 距离 < 入场价 × min_sl_pct），按最小距离外扩止损，防扫损。
     """
     if fvg_type == "bullish":
         sl = bottom
         sl_dist = entry_price - sl
         if sl_dist <= 0:
             sl_dist = abs(entry_price - bottom) or entry_price * 0.001
+            sl = entry_price - sl_dist
+        min_dist = entry_price * min_sl_pct
+        if sl_dist < min_dist:
+            sl_dist = min_dist
             sl = entry_price - sl_dist
         tp = entry_price + RR * sl_dist
         return round(sl, 4), round(tp, 4)
@@ -94,6 +127,10 @@ def compute_sltp(entry_price, fvg_type, bottom, top):
         sl_dist = sl - entry_price
         if sl_dist <= 0:
             sl_dist = abs(top - entry_price) or entry_price * 0.001
+            sl = entry_price + sl_dist
+        min_dist = entry_price * min_sl_pct
+        if sl_dist < min_dist:
+            sl_dist = min_dist
             sl = entry_price + sl_dist
         tp = entry_price - RR * sl_dist
         return round(sl, 4), round(tp, 4)
@@ -143,25 +180,8 @@ def open_position(contract, fvg, base_dir, dry_run=False):
         return {"ok": False, "reason": str(e)}
     print(f"[trade] 开仓成功 ordId={order.get('ordId')} qty={order.get('qty')}")
 
-    # 挂 OCO 止盈止损：先撤旧挂新，同一合约+方向只保留一组 OCO，避免 App 堆积大量止盈止损
-    try:
-        pend = okx_exec.get_algo_orders(inst=contract, ord_type="oco")
-        for a in pend:
-            if a.get("instId") == inst_okx and a.get("posSide") == direction:
-                okx_exec.cancel_algo(contract, a.get("algoId"))
-    except Exception as e:  # noqa: BLE001
-        print(f"[warn] 撤销旧OCO失败(继续): {e}")
-
-    # OCO 张数用当前该方向实际总持仓，确保覆盖合并后的全部仓位
+    # OCO 止盈止损：数量=本次开仓量，各仓独立挂单、互不覆盖（不做"撤旧挂新"）
     oco_qty = order.get("qty", 0)
-    try:
-        poss = okx_exec.get_positions(contract)
-        for p in poss:
-            if p.get("posSide") == direction and abs(float(p.get("pos", 0) or 0)) > 0:
-                oco_qty = abs(float(p.get("pos", 0)))
-                break
-    except Exception as e:  # noqa: BLE001
-        print(f"[warn] 查询持仓张数失败(用本次开仓张数): {e}")
 
     algo = {}
     try:
@@ -192,11 +212,75 @@ def open_position(contract, fvg, base_dir, dry_run=False):
     return {"ok": True, "order": order, "algo": algo, "record": rec}
 
 
+def reconcile_positions(base_dir, contract, dry_run=False):
+    """对账持仓状态：把已平掉的 open 记录标记为 closed。
+
+    判定依据（取其一即视为已平）：
+      1) 该方向 OKX 总持仓为 0（查询成功时）；
+      2) 记录里的 OCO algoId 已不在交易所 pending 列表（OCO 触发即平仓）。
+    查询失败时保持原状，宁可漏判也不误标（避免同周期同方向重复开仓）。
+    """
+    if dry_run:
+        return
+    state = load_traded_state(base_dir)
+    positions = state["positions"]
+    if not positions:
+        return
+    changed = False
+    # 该合约相关记录
+    keys = [k for k in positions if k.startswith(contract + "|")]
+    if not keys:
+        return
+    # 1) pending OCO 集合
+    pend_ids = set()
+    try:
+        pend = okx_exec.get_algo_orders(inst=contract, ord_type="oco")
+        pend_ids = {str(a.get("algoId")) for a in pend if a.get("algoId")}
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 查询pending OCO失败(对账降级): {e}")
+    # 2) 各方向持仓张数
+    poss_ok = False
+    pos_by_dir = {}
+    try:
+        poss = okx_exec.get_positions(contract)
+        poss_ok = True
+        for p in poss:
+            if abs(float(p.get("pos", 0) or 0)) > 0:
+                d = p.get("posSide")
+                pos_by_dir[d] = pos_by_dir.get(d, 0) + abs(float(p.get("pos", 0)))
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 查询持仓失败(对账降级): {e}")
+    for k in keys:
+        rec = positions[k]
+        if not isinstance(rec, dict) or rec.get("status") != "open":
+            continue
+        direction = k.split("|")[2]
+        algo_id = str(rec.get("algo_id") or "")
+        if poss_ok and pos_by_dir.get(direction, 0) == 0:
+            rec["status"] = "closed"
+            changed = True
+            print(f"[trade] 对账: {k} 已平仓(持仓为0)")
+        elif algo_id and algo_id not in pend_ids:
+            rec["status"] = "closed"
+            changed = True
+            print(f"[trade] 对账: {k} 已平仓(OCO已触发/撤销)")
+    if changed:
+        save_traded_state(base_dir, state)
+
+
+def has_open_position(contract, interval, direction, state):
+    """单仓约束：同币种+同方向+同周期是否已有未平仓。"""
+    rec = state["positions"].get(f"{contract}|{interval}|{direction}")
+    return isinstance(rec, dict) and rec.get("status") == "open"
+
+
 def trade_all_fvgs(contract, intervals, window_start, window_end, min_gap=1.0,
                    base_dir=None, dry_run=False):
-    """扫描 FVG 并对每个新信号开单（不限制数量/周期）。返回开单汇总。"""
+    """扫描 FVG 并对新信号开单（单仓约束：同币种+同方向+同周期不重复开）。
+    返回开单汇总。"""
     import fvg_scanner
     result = fvg_scanner.scan(contract, intervals, window_start, window_end, min_gap)
+    reconcile_positions(base_dir, contract, dry_run=dry_run)
     state = load_traded_state(base_dir)
     opened = []
     for interval in intervals:
@@ -204,16 +288,30 @@ def trade_all_fvgs(contract, intervals, window_start, window_end, min_gap=1.0,
         if "error" in info or not info.get("fvgs"):
             continue
         for f in info["fvgs"]:
-            key = f"{contract}|{interval}|{f['time']}"
-            if state.get(key):
+            direction = "long" if f["type"] == "bullish" else "short"
+            # 同一信号只开一次（按 合约|周期|时间）
+            sig_key = f"{contract}|{interval}|{f['time']}"
+            if state["opened_signals"].get(sig_key):
                 continue  # 已开单，跳过
+            # 单仓约束：同币种+同方向+同周期已有未平仓 → 跳过
+            if has_open_position(contract, interval, direction, state):
+                print(f"[trade] 跳过: {contract} {interval} {direction} 已有未平仓(单仓约束)")
+                continue
             f2 = dict(f)
             f2["interval"] = interval
             print(f"[trade] 发现新FVG: {contract} {interval} {f['time']} {f['type']}")
             r = open_position(contract, f2, base_dir, dry_run=dry_run)
-            opened.append({"key": key, "result": r})
-            if r.get("ok"):  # 仅成功才标记去重，失败保留以便下轮重试
-                state[key] = 1
+            opened.append({"key": sig_key, "result": r})
+            if r.get("ok") and not dry_run:  # 仅真实开单成功才记录，失败/演练保留以便下轮重试
+                state["opened_signals"][sig_key] = 1
+                pos_key = f"{contract}|{interval}|{direction}"
+                state["positions"][pos_key] = {
+                    "status": "open",
+                    "algo_id": (r.get("algo") or {}).get("algoId", ""),
+                    "qty": (r.get("order") or {}).get("qty", 0),
+                    "time": f["time"],
+                    "entry": r.get("entry_ref", 0),
+                }
                 save_traded_state(base_dir, state)
             if not dry_run:
                 time.sleep(1)  # 避免 OKX 限频
@@ -234,8 +332,8 @@ def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     if args.reset:
         state = load_traded_state(base_dir)
-        save_traded_state(base_dir, {})
-        print(f"[trade] 已清空去重状态（{len(state)} 条）")
+        save_traded_state(base_dir, {"positions": {}, "opened_signals": {}})
+        print(f"[trade] 已清空持仓/去重状态（{len(state['positions'])} 仓, {len(state['opened_signals'])} 信号）")
 
     intervals = [s.strip() for s in args.intervals.split(",") if s.strip()]
     now_bj = datetime.now(BJ_TZ)
