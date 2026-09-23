@@ -83,13 +83,19 @@ def build_report(day_str, dry=False):
         if not orders:
             per_contract[contract] = 0
             continue
-        # fills 为逐笔成交：开单数按 ordId 去重
+        # fills 为逐笔成交：开单数按 ordId 去重，方向取每个 ordId 的首笔成交 side
         ord_ids = {o.get("ordId") for o in orders}
         per_contract[contract] = len(ord_ids)
         total_orders += len(ord_ids)
+        first_side = {}
+        for o in orders:
+            oid = o.get("ordId")
+            if oid not in first_side:
+                first_side[oid] = o.get("side", "?")
+        for s in first_side.values():
+            direction_stat[s] = direction_stat.get(s, 0) + 1
         for o in orders:
             side = o.get("side", "?")
-            direction_stat[side] = direction_stat.get(side, 0) + 1
             pnl = float(o.get("pnl") or 0.0)      # 已实现盈亏（USDT）
             fee = float(o.get("fee") or 0.0)      # 手续费（负值）
             net = pnl + fee
