@@ -193,8 +193,9 @@ def trade_all_fvgs(contract, intervals, window_start, window_end, min_gap=1.0,
             print(f"[trade] 发现新FVG: {contract} {interval} {f['time']} {f['type']}")
             r = open_position(contract, f2, base_dir, dry_run=dry_run)
             opened.append({"key": key, "result": r})
-            state[key] = 1
-            save_traded_state(base_dir, state)
+            if r.get("ok"):  # 仅成功才标记去重，失败保留以便下轮重试
+                state[key] = 1
+                save_traded_state(base_dir, state)
             if not dry_run:
                 time.sleep(1)  # 避免 OKX 限频
     return {"contract": contract, "opened": opened,
