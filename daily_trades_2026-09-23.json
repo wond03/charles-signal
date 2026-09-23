@@ -984,5 +984,39 @@
     "ord_id": "3947611916055515136",
     "qty": 2.0,
     "algo_id": "3947611931032457216"
+  },
+  {
+    "time": "2026-09-23 16:00",
+    "ts": null,
+    "contract": "BTC_USDT",
+    "interval": "1h",
+    "type": "bearish",
+    "side": "sell",
+    "direction": "short",
+    "entry_ref": 86143.5,
+    "sl": 86308.6,
+    "tp": 85813.3,
+    "size_usdt": 5.0,
+    "leverage": 100,
+    "ord_id": "3947619665720020992",
+    "qty": 0.01,
+    "algo_id": "3947619680428527616"
+  },
+  {
+    "time": "2026-09-23 16:00",
+    "ts": null,
+    "contract": "XAU_USDT",
+    "interval": "1h",
+    "type": "bearish",
+    "side": "sell",
+    "direction": "short",
+    "entry_ref": 4324.8,
+    "sl": 4332.64,
+    "tp": 4309.12,
+    "size_usdt": 5.0,
+    "leverage": 50,
+    "ord_id": "3947619867784810496",
+    "qty": 2.0,
+    "algo_id": "3947619883197960192"
   }
 ]
