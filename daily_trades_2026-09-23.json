@@ -1562,5 +1562,22 @@
     "ord_id": "3949153752943329280",
     "qty": 59.0,
     "algo_id": "3949153764463984640"
+  },
+  {
+    "time": "2026-09-23 22:55",
+    "ts": null,
+    "contract": "XAU_USDT",
+    "interval": "5m",
+    "type": "bullish",
+    "side": "buy",
+    "direction": "long",
+    "entry_ref": 4289.9,
+    "sl": 4277.0303,
+    "tp": 4315.6394,
+    "size_usdt": 5.0,
+    "leverage": 50,
+    "ord_id": "3949203801895239680",
+    "qty": 59.0,
+    "algo_id": "3949203816368685056"
   }
 ]
