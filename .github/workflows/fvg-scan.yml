@@ -65,6 +65,7 @@ jobs:
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
           OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
           OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 每次扫描后刷新当日日报文件，内容有变化即直发老板个人（wecom-cli）
           npm install -g @wecom/cli@1.3.2
@@ -87,3 +88,4 @@ jobs:
             git pull --rebase --autostash || true
             git push
           fi
+
