@@ -158,6 +158,16 @@ def fetch_github_runs():
 
 # ---------------- 统计计算 ----------------
 
+def _fmt_px(px):
+    """价格展示：数值转 float 保留 2 位；异常原样返回。"""
+    if px in (None, "-", ""):
+        return "-"
+    try:
+        return f"{float(px):.2f}"
+    except (TypeError, ValueError):
+        return str(px)
+
+
 def _aggregate_closed(fills):
     """把逐笔成交按 ordId 聚合为订单级记录。"""
     by_oid = {}
@@ -386,10 +396,10 @@ def build_report(day_str, dry=False, base_dir=".", compact=False):
                 continue
             inst = p.get("instId", "?")
             side = p.get("posSide", "?")
-            avg = p.get("avgPx", "-")
-            mark = p.get("markPx", "-")
+            avg = _fmt_px(p.get("avgPx"))
+            mark = _fmt_px(p.get("markPx"))
             up = float(p.get("upl") or 0.0)
-            lev = p.get("lev", "-")
+            lev = p.get("lev") or p.get("lever") or "-"
             lines.append(f"- {inst} {side} 开 {avg} 现 {mark} 浮盈 {up:+.2f} 杠杆 {lev}x")
         if not any(True for _ in pos):
             lines.append("- 无持仓")
