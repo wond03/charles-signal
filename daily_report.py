@@ -51,6 +51,13 @@ def day_range(day_str):
     return day, day + timedelta(days=1)
 
 
+def rolling_window():
+    """返回滚动 24h 窗口 (start_bj, end_bj)：从当前推送时刻往前推 24h。
+    例如 4:20 推送 -> 前日 4:20 ~ 今日 4:20。"""
+    end_bj = datetime.now(BJ_TZ)
+    return end_bj - timedelta(hours=24), end_bj
+
+
 def to_ms(ts_bj):
     return int(ts_bj.timestamp() * 1000)
 
@@ -78,6 +85,27 @@ def load_daily_trades(day_str, base_dir="."):
         return []
 
 
+def load_daily_trades_window(win_start, win_end, base_dir="."):
+    """滚动窗口内开仓明细：跨日合并 daily_trades_*.json，按 time 过滤 [win_start, win_end)。"""
+    trades = []
+    day = win_start.date()
+    while day <= win_end.date():
+        trades.extend(load_daily_trades(day.strftime("%Y-%m-%d"), base_dir))
+        day += timedelta(days=1)
+    out = []
+    for t in trades:
+        ts = t.get("time")
+        if not ts:
+            continue
+        try:
+            dt = datetime.strptime(ts, "%Y-%m-%d %H:%M").replace(tzinfo=BJ_TZ)
+        except ValueError:
+            continue
+        if win_start <= dt < win_end:
+            out.append(t)
+    return out
+
+
 def load_fvg_pushed(day_str, base_dir="."):
     """当日推送过的 FVG 信号 key（contract|interval|time）。"""
     path = os.path.join(base_dir, ".fvg_pushed.json")
@@ -89,6 +117,30 @@ def load_fvg_pushed(day_str, base_dir="."):
     except (OSError, ValueError):
         return []
     keys = [k for k in d.keys() if day_str in str(k)]
+    return sorted(keys)
+
+
+def load_fvg_pushed_window(win_start, win_end, base_dir="."):
+    """滚动窗口内推送过的 FVG 信号 key：按 key 中时间字段过滤 [win_start, win_end)。"""
+    path = os.path.join(base_dir, ".fvg_pushed.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return []
+    keys = []
+    for k in d.keys():
+        parts = str(k).split("|")
+        if len(parts) < 3:
+            continue
+        try:
+            t = datetime.strptime(parts[2], "%Y-%m-%d %H:%M").replace(tzinfo=BJ_TZ)
+        except ValueError:
+            continue
+        if win_start <= t < win_end:
+            keys.append(k)
     return sorted(keys)
 
 
@@ -243,15 +295,23 @@ def compute_metrics(closed):
 
 # ---------------- 日报生成 ----------------
 
-def build_report(day_str, dry=False, base_dir=".", compact=False):
-    """生成日报。compact=True 返回企微推送版（模板结构，<2048B）。"""
-    start_bj, end_bj = day_range(day_str)
+def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False):
+    """生成日报。compact=True 返回企微推送版（模板结构，<2048B）。
+    rolling=True 时按当前推送时刻往前推 24h 的滚动窗口统计；否则按 day_str 自然日。"""
+    if rolling:
+        start_bj, end_bj = rolling_window()
+    else:
+        start_bj, end_bj = day_range(day_str)
     begin_ms, end_ms = to_ms(start_bj), to_ms(end_bj)
     warn = []
 
     # ---- 采集（全部防御式） ----
-    trades = load_daily_trades(day_str, base_dir)
-    fvg_keys = load_fvg_pushed(day_str, base_dir)
+    if rolling:
+        trades = load_daily_trades_window(start_bj, end_bj, base_dir)
+        fvg_keys = load_fvg_pushed_window(start_bj, end_bj, base_dir)
+    else:
+        trades = load_daily_trades(day_str, base_dir)
+        fvg_keys = load_fvg_pushed(day_str, base_dir)
     fills_all = []
     for contract in _INST_OKX:
         r = _safe(lambda c=contract: fetch_fills(c, begin_ms, end_ms), None)
@@ -724,8 +784,9 @@ def main():
     args = parser.parse_args()
 
     day_str = args.date or datetime.now(BJ_TZ).strftime("%Y-%m-%d")
-    full = build_report(day_str, base_dir=args.base_dir, compact=False)
-    push = build_report(day_str, base_dir=args.base_dir, compact=True)
+    rolling = args.date is None  # 未指定日期：按推送时刻往前推 24h 滚动窗口
+    full = build_report(day_str, base_dir=args.base_dir, compact=False, rolling=rolling)
+    push = build_report(day_str, base_dir=args.base_dir, compact=True, rolling=rolling)
 
     print(full)
 
