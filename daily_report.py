@@ -21,6 +21,7 @@ FVG 自动交易 · 每日统计与推送
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -30,7 +31,8 @@ import okx_exec
 
 BJ_TZ = timezone(timedelta(hours=8))
 WECOM_USERID = "won22_bgAAVzd-4_LKT6VxA_Sf8lNoIw"  # Wind
-WECOM_CLI = "/home/marvis/.npm-global/bin/wecom-cli"
+WECOM_CLI = (os.environ.get("WECOM_CLI") or shutil.which("wecom-cli")
+             or "/home/marvis/.npm-global/bin/wecom-cli")
 
 _INST_OKX = {"BTC_USDT": "BTC-USDT-SWAP", "XAU_USDT": "XAU-USDT-SWAP"}
 
@@ -70,7 +72,6 @@ def build_report(day_str, dry=False):
     total_pnl = 0.0
     wins = 0
     losses = 0
-    closed_rows = []
     per_contract = {}
     direction_stat = {"buy": 0, "sell": 0}
 
@@ -95,7 +96,6 @@ def build_report(day_str, dry=False):
         for s in first_side.values():
             direction_stat[s] = direction_stat.get(s, 0) + 1
         for o in orders:
-            side = o.get("side", "?")
             pnl = float(o.get("pnl") or 0.0)      # 已实现盈亏（USDT）
             fee = float(o.get("fee") or 0.0)      # 手续费（负值）
             net = pnl + fee
@@ -104,12 +104,6 @@ def build_report(day_str, dry=False):
                 wins += 1
             elif pnl < 0:
                 losses += 1
-            if pnl != 0 or fee != 0:
-                closed_rows.append({
-                    "contract": contract, "side": side,
-                    "px": o.get("px") or o.get("avgPx"), "pnl": pnl, "fee": fee, "net": net,
-                    "state": o.get("state"),
-                })
 
     # 摘要
     lines.append(f"**开单数**：{total_orders} 笔")
@@ -118,14 +112,6 @@ def build_report(day_str, dry=False):
     lines.append(f"**方向**：多 {direction_stat.get('buy', 0)} 笔 / 空 {direction_stat.get('sell', 0)} 笔")
     lines.append(f"**已平仓**：{wins} 盈 / {losses} 亏")
     lines.append(f"**净盈亏**：<font color=\"{'info' if total_pnl >= 0 else 'warning'}\">{total_pnl:+.2f} USDT</font>")
-    lines.append("")
-    lines.append("明细（平仓/有费用）：")
-    if not closed_rows:
-        lines.append("- 当日无已平仓记录（持仓中或未成交）")
-    else:
-        for r in closed_rows[-10:]:
-            arrow = "▲" if r["side"] == "buy" else "▼"
-            lines.append(f"- {r['contract'].replace('_USDT','')} {arrow} {r['px']} 净 {r['net']:+.2f}")
     lines.append("")
     lines.append("> 模拟盘自动交易 · FVG 策略")
     text = "\n".join(lines)
