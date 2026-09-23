@@ -51,7 +51,7 @@ jobs:
   daily-report:
     runs-on: ubuntu-latest
     needs: [scan-trade]
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' && github.event.schedule == '10 16 * * *'
     steps:
       - uses: actions/checkout@v4
 
@@ -69,5 +69,17 @@ jobs:
           OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
           OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
         run: |
-          # 统计北京时间昨日自然日并推送群机器人
-          python3 daily_report.py --date "$(TZ=Asia/Shanghai date -d 'yesterday' +%Y-%m-%d)" --push-webhook || true
+          # 统计北京时间昨日自然日并推送群机器人；日报同时落盘供本地 CLI 直发
+          python3 daily_report.py --date "$(TZ=Asia/Shanghai date -d 'yesterday' +%Y-%m-%d)" --push-webhook --save-dir . || true
+
+      - name: Persist daily report
+        run: |
+          git config user.name "marvis-bot"
+          git config user.email "marvis-bot@users.noreply.github.com"
+          git add daily_report_*.md
+          if git diff --cached --quiet; then
+            echo "no report, skip commit"
+          else
+            git commit -m "chore: daily report [skip ci]"
+            git push
+          fi
