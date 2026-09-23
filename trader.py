@@ -334,14 +334,20 @@ def reconcile_positions(base_dir, contract, dry_run=False):
         # 兼容新旧两种格式：合约|方向（2段） 与 合约|周期|方向（3段，迁移残留）
         direction = parts[1] if len(parts) == 2 else parts[2]
         algo_id = str(rec.get("algo_id") or "")
+        # 已平仓判定：持仓为0 是唯一可靠依据（查询成功时）
+        # 查询失败时保持原状，宁可漏判也不误标（防止同方向重复开仓）
         if poss_ok and pos_by_dir.get(direction, 0) == 0:
             rec["status"] = "closed"
             changed = True
             print(f"[trade] 对账: {k} 已平仓(持仓为0)")
-        elif algo_id and algo_id not in pend_ids:
+        elif poss_ok and pos_by_dir.get(direction, 0) > 0:
+            # OKX 该方向仍有持仓：即使 algoId 不在 pending（OCO 查询偶发空/已被撤销但仓在），也不标 closed
+            pass
+        elif not poss_ok and algo_id and pend_ids and algo_id not in pend_ids:
+            # 持仓查询失败时的保守兜底：仅当 OCO 查询成功（pend_ids 非空）且确认 algo 已不在 pending 才判已平
             rec["status"] = "closed"
             changed = True
-            print(f"[trade] 对账: {k} 已平仓(OCO已触发/撤销)")
+            print(f"[trade] 对账: {k} 已平仓(OCO已触发/撤销,持仓查询失败兜底)")
     if changed:
         save_traded_state(base_dir, state)
 
