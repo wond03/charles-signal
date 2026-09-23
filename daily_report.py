@@ -45,9 +45,10 @@ def to_ms(ts_bj):
     return int(ts_bj.timestamp() * 1000)
 
 
-def fetch_orders(inst, begin_ms, end_ms):
+def fetch_orders(contract, begin_ms, end_ms):
     """拉取 OKX 当日成交历史（归档接口，含已平仓盈亏）。"""
-    params = {"instId": inst, "begin": str(begin_ms), "end": str(end_ms), "limit": "100"}
+    inst_okx = _INST_OKX.get(contract, contract)  # 内部代码 -> OKX SWAP 代码
+    params = {"instId": inst_okx, "begin": str(begin_ms), "end": str(end_ms), "limit": "100"}
     data = okx_exec._private_request("GET", "/api/v5/trade/orders-history-archive", params=params)
     return data.get("data", [])
 
