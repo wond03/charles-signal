@@ -80,7 +80,7 @@ jobs:
         run: |
           git config user.name "marvis-bot"
           git config user.email "marvis-bot@users.noreply.github.com"
-          git add .fvg_pushed.json .fvg_traded.json .fills_pushed.json daily_trades_*.json daily_report_*.md .daily_report_hash 2>/dev/null || git add -A
+          git add .fvg_pushed.json .fvg_traded.json .fills_pushed.json .not_triggered.json daily_trades_*.json daily_report_*.md .daily_report_hash 2>/dev/null || git add -A
           if git diff --cached --quiet; then
             echo "no state change, skip commit"
           else
