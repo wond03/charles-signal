@@ -245,17 +245,28 @@ def latest_price(contract):
     return None
 
 
+def signal_id(contract, f):
+    """生成信号 ID，如 FVG-BTC-20260923-1400。"""
+    sym = contract.split("_")[0]
+    t = f["time"].replace("-", "").replace(":", "").replace(" ", "-")
+    return f"FVG-{sym}-{t}"
+
+
 def open_tpl_block(contract, f, entry_price):
-    """开仓模板 markdown 区块（杠杆/单笔/SL/TP，与 trader.py 参数一致）。"""
+    """开仓模板 markdown 区块（杠杆/单笔/SL/TP/仓位，与 trader.py 参数一致）。"""
     lev = LEVERAGE.get(contract, 100)
     sl, tp = compute_sltp(entry_price, f["type"], f["bottom"], f["top"])
     side = "多" if f["type"] == "bullish" else "空"
+    notional = TRADE_SIZE_USDT * lev
+    qty_est = notional / entry_price if entry_price else 0.0
     return (
         "\n────────────\n"
-        f"**开仓模板**：{contract} · {side} {lev}x · 单笔 {TRADE_SIZE_USDT:.0f}U\n"
+        f"**开仓模板**：{contract} · {side} {lev}x · 单笔 {TRADE_SIZE_USDT:.0f}U 保证金\n"
         f"**入场参考**：<font color=\"comment\">{entry_price:.4f}</font>（最新价）\n"
-        f"**止损**：<font color=\"warning\">{sl}</font>\n"
-        f"**止盈**：<font color=\"info\">{tp}</font>（RR 1:{RR:.0f}）"
+        f"**止损**：<font color=\"warning\">{sl}</font>（缺口边界，无缓冲）\n"
+        f"**止盈**：<font color=\"info\">{tp}</font>（RR 1:{RR:.0f}）\n"
+        f"**名义价值**：≈{notional:.0f}U · 数量 ≈{qty_est:.6f}\n"
+        f"**风险提示**：{lev}x 杠杆风险极高，滑点与手续费可能显著影响小止损单"
     )
 
 
@@ -265,10 +276,12 @@ def send_single(webhook, contract, interval, f, entry_price):
     color = _color_for(f)
     content = (
         f"# 🔔 FVG 信号 · {contract}\n\n"
+        f"**时间**：<font color=\"comment\">{f['time']}（UTC+8）</font>\n"
         f"**周期**：{interval.upper()}\n"
-        f"**时间**：<font color=\"comment\">{f['time']}</font>\n"
         f"**方向**：<font color=\"{color}\">{arrow}</font>\n"
-        f"**区间**：`{f['bottom']} ~ {f['top']}`"
+        f"**区间**：`{f['bottom']} ~ {f['top']}`\n"
+        f"**信号 ID**：{signal_id(contract, f)}\n"
+        f"**状态**：待自动开单（已推送）"
         + open_tpl_block(contract, f, entry_price)
     )
     payload = {"msgtype": "markdown", "markdown": {"content": content}}
@@ -280,7 +293,9 @@ def send_single(webhook, contract, interval, f, entry_price):
 def send_resonance(webhook, contract, time_str, items, entry_price):
     """多周期同一时间的 FVG 合并为一条共振消息（多周期共振）。"""
     lines = [f"# ⚡ FVG 共振 · {contract}", "",
-             f"**时间**：<font color=\"comment\">{time_str}</font>", ""]
+             f"**时间**：<font color=\"comment\">{time_str}（UTC+8）</font>",
+             f"**信号 ID**：{signal_id(contract, items[0][1])}",
+             f"**状态**：待自动开单（已推送）", ""]
     for interval, f in items:
         arrow = "▲ 看涨" if f["type"] == "bullish" else "▼ 看跌"
         color = _color_for(f)
