@@ -1,0 +1,41 @@
+name: FVG Scan & Push
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # 每5分钟一次，5M 周期滞后 <= 1根K线
+  workflow_dispatch:        # 支持手动触发
+
+permissions:
+  contents: write           # 提交 .fvg_pushed.json 去重状态回仓库
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Scan FVG & push wecom
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+        run: |
+          python3 fvg_scanner.py --contract BTC_USDT --push || true
+          python3 fvg_scanner.py --contract XAU_USDT --push || true
+
+      - name: Persist pushed dedup state
+        run: |
+          git config user.name "marvis-bot"
+          git config user.email "marvis-bot@users.noreply.github.com"
+          git add .fvg_pushed.json
+          if git diff --cached --quiet; then
+            echo "no state change, skip commit"
+          else
+            git commit -m "chore: update fvg pushed state [skip ci]"
+            git push
+          fi
