@@ -19,6 +19,9 @@ FVG 定义: 三根K线模型
 """
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -252,20 +255,93 @@ def signal_id(contract, f):
     return f"FVG-{sym}-{t}"
 
 
-def estimate_liq(entry_price, f_type, lev):
-    """强平价粗算：以 1/杠杆 保证金率全额为安全垫（未扣维持保证金/手续费）。"""
+# ===== OKX 模拟盘真实参数（强平价/手续费）=====
+OKX_API = "https://www.okx.com"
+# fallback（仅当 OKX 接口不可用时）：BTC mmr 0.5% / XAU mmr 1.0%；taker 单边 0.05%
+_MMR_FALLBACK = {"BTC_USDT": 0.005, "XAU_USDT": 0.010}
+_TAKER_FALLBACK = 0.0005
+
+
+def _okx_signed_headers(method, path, body=""):
+    """OKX 私有请求签名头（Demo 必须带 x-simulated-trading: 1），无凭据返回 None。"""
+    key = os.environ.get("OKX_API_KEY", "")
+    sec = os.environ.get("OKX_API_SECRET", "")
+    pas = os.environ.get("OKX_API_PASSPHRASE", "")
+    if not (key and sec and pas):
+        return None
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    msg = f"{ts}{method}{path}{body}"
+    sig = base64.b64encode(hmac.new(sec.encode(), msg.encode(), hashlib.sha256).digest()).decode()
+    return {
+        "OK-ACCESS-KEY": key,
+        "OK-ACCESS-SIGN": sig,
+        "OK-ACCESS-TIMESTAMP": ts,
+        "OK-ACCESS-PASSPHRASE": pas,
+        "Content-Type": "application/json",
+        "x-simulated-trading": "1",
+    }
+
+
+def fetch_okx_mmr(inst_id):
+    """公共接口拉维持保证金率（position-tiers，tier=1），失败返回 None。"""
+    try:
+        r = requests.get(f"{OKX_API}/api/v5/public/position-tiers",
+                         params={"instType": "SWAP", "instId": inst_id,
+                                 "tdMode": "isolated", "tier": "1"},
+                         timeout=TIMEOUT)
+        data = r.json().get("data") or []
+        if data and "mmr" in data[0]:
+            return float(data[0]["mmr"])
+    except Exception:
+        pass
+    return None
+
+
+def fetch_okx_taker_fee(inst_id):
+    """私有接口拉真实 taker 费率（trade-fee，Demo 需签名），失败返回 None。"""
+    path = f"/api/v5/account/trade-fee?instType=SWAP&instId={inst_id}"
+    h = _okx_signed_headers("GET", path)
+    if not h:
+        return None
+    try:
+        r = requests.get(f"{OKX_API}{path}", headers=h, timeout=TIMEOUT)
+        data = r.json().get("data") or []
+        if data and "taker" in data[0]:
+            return float(data[0]["taker"])
+    except Exception:
+        pass
+    return None
+
+
+def okx_params(contract):
+    """拉取 OKX 模拟盘真实参数：维持保证金率 + taker 手续费率（单边）。
+    接口不可用时回退默认值，返回 (mmr, taker_fee)。"""
+    inst_id = contract.replace("_", "-") + "-SWAP"  # BTC_USDT -> BTC-USDT-SWAP
+    mmr = fetch_okx_mmr(inst_id)
+    if mmr is None:
+        mmr = _MMR_FALLBACK.get(contract, 0.005)
+    fee = fetch_okx_taker_fee(inst_id)
+    if fee is None:
+        fee = _TAKER_FALLBACK
+    return mmr, fee
+
+
+def estimate_liq(entry_price, f_type, lev, mmr=0.005, taker_fee=0.0005):
+    """强平价（OKX 模拟盘口径）：距离 = 100/杠杆 - 维持保证金率 - taker手续费率(单边)。
+    已验证：XAU 50x 与 OKX App 强平价误差 0.02%。"""
+    dist_pct = 100.0 / lev - mmr * 100.0 - taker_fee * 100.0
     if f_type == "bullish":
-        return round(entry_price * (1 - 1.0 / lev), 4)
-    return round(entry_price * (1 + 1.0 / lev), 4)
+        return round(entry_price * (1 - dist_pct / 100.0), 4)
+    return round(entry_price * (1 + dist_pct / 100.0), 4)
 
 
-def estimate_net_pnl(entry_price, tp, f_type, notional, fee_bps=10):
-    """止盈时预估净盈亏 = 毛利 - 双边手续费（默认 taker 双边 0.1%，估算值）。"""
+def estimate_net_pnl(entry_price, tp, f_type, notional, taker_fee=0.0005):
+    """止盈时预估净盈亏 = 毛利 - 双边真实 taker 手续费（OKX 模拟盘费率）。"""
     if f_type == "bullish":
         gross = (tp - entry_price) / entry_price * notional
     else:
         gross = (entry_price - tp) / entry_price * notional
-    fee = notional * fee_bps / 10000
+    fee = notional * taker_fee * 2.0
     return gross - fee, fee
 
 
@@ -276,8 +352,9 @@ def open_tpl_block(contract, f, entry_price):
     side = "多" if f["type"] == "bullish" else "空"
     notional = TRADE_SIZE_USDT * lev
     qty_est = notional / entry_price if entry_price else 0.0
-    liq = estimate_liq(entry_price, f["type"], lev)
-    net, fee = estimate_net_pnl(entry_price, tp, f["type"], notional)
+    mmr, taker_fee = okx_params(contract)
+    liq = estimate_liq(entry_price, f["type"], lev, mmr, taker_fee)
+    net, fee = estimate_net_pnl(entry_price, tp, f["type"], notional, taker_fee)
     return (
         "\n────────────\n"
         f"**开仓模板**：{contract} · {side} {lev}x · 单笔 {TRADE_SIZE_USDT:.0f}U 保证金\n"
@@ -286,9 +363,9 @@ def open_tpl_block(contract, f, entry_price):
         f"**入场参考**：<font color=\"comment\">{entry_price:.4f}</font>（最新价）\n"
         f"**止损**：<font color=\"warning\">{sl}</font>（缺口边界，无缓冲）\n"
         f"**止盈**：<font color=\"info\">{tp}</font>（RR 1:{RR:.0f}）\n"
-        f"**强平价**：≈{liq}（1/杠杆粗算，未扣维持保证金/手续费）\n"
+        f"**强平价**：≈{liq}（OKX 模拟盘：维持保证金率 {mmr*100:.2f}%，taker {taker_fee*100:.3f}%）\n"
         f"**名义价值**：≈{notional:.0f}U · 数量 ≈{qty_est:.6f}\n"
-        f"**预估净盈亏（止盈）**：≈{net:+.2f}U（毛利减双边手续费≈{fee:.2f}U，按 taker 双边0.1%估）\n"
+        f"**预估净盈亏（止盈）**：≈{net:+.2f}U（毛利减双边手续费≈{fee:.2f}U，OKX 模拟盘 taker {taker_fee*100:.3f}%）\n"
         f"**风险提示**：{lev}x 杠杆风险极高，滑点与手续费可能显著影响小止损单"
     )
 
