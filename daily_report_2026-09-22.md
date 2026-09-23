@@ -4,18 +4,6 @@
 **分品种**：BTC 4 / XAU 3
 **方向**：多 3 笔 / 空 4 笔
 **已平仓**：0 盈 / 0 亏
-**净盈亏**：<font color="warning">-1.27 USDT</font>
-
-明细（平仓/有费用）：
-- BTC ▼ None 净 -0.23
-- BTC ▲ None 净 -0.00
-- BTC ▲ None 净 -0.00
-- BTC ▲ None 净 -0.00
-- BTC ▲ None 净 -0.22
-- BTC ▼ None 净 -0.24
-- XAU ▲ None 净 -0.12
-- XAU ▼ None 净 -0.12
-- XAU ▼ None 净 -0.10
-- XAU ▼ None 净 -0.02
+**净盈亏**：<font color="warning">-1.25 USDT</font>
 
 > 模拟盘自动交易 · FVG 策略
