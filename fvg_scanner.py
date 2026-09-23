@@ -205,14 +205,19 @@ def load_webhook(explicit=None):
     return None
 
 
+def _color_for(f):
+    """看涨=绿(info)，看跌=红(warning)。企业微信 markdown 仅支持 info/warning/comment 三色。"""
+    return "info" if f["type"] == "bullish" else "warning"
+
+
 def send_single(webhook, contract, interval, f):
     """单个 FVG 推送一条企业微信 markdown 消息（含周期与时间）。"""
     arrow = "▲ 看涨" if f["type"] == "bullish" else "▼ 看跌"
-    color = "info" if f["type"] == "bullish" else "comment"
+    color = _color_for(f)
     content = (
         f"# 🔔 FVG 信号 · {contract}\n\n"
         f"**周期**：{interval.upper()}\n"
-        f"**时间**：<font color=\"warning\">{f['time']}</font>\n"
+        f"**时间**：<font color=\"comment\">{f['time']}</font>\n"
         f"**方向**：<font color=\"{color}\">{arrow}</font>\n"
         f"**区间**：`{f['bottom']} ~ {f['top']}`"
     )
@@ -225,10 +230,10 @@ def send_single(webhook, contract, interval, f):
 def send_resonance(webhook, contract, time_str, items):
     """多周期同一时间的 FVG 合并为一条共振消息（多周期共振）。"""
     lines = [f"# ⚡ FVG 共振 · {contract}", "",
-             f"**时间**：<font color=\"warning\">{time_str}</font>", ""]
+             f"**时间**：<font color=\"comment\">{time_str}</font>", ""]
     for interval, f in items:
         arrow = "▲ 看涨" if f["type"] == "bullish" else "▼ 看跌"
-        color = "info" if f["type"] == "bullish" else "comment"
+        color = _color_for(f)
         lines.append(f"> **{interval.upper()}** <font color=\"{color}\">{arrow}</font> · `{f['bottom']} ~ {f['top']}`")
     lines += ["", "多周期共振，信号增强"]
     payload = {"msgtype": "markdown", "markdown": {"content": "\n".join(lines)}}
