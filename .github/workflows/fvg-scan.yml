@@ -59,11 +59,26 @@ jobs:
           python3 trader.py --contract BTC_USDT --intervals 1h,15m,5m || true
           python3 trader.py --contract XAU_USDT --intervals 1h,15m,5m || true
 
+      - name: Push new fills to personal (wecom-cli)
+        env:
+          WECOM_ENC_KEY: ${{ secrets.WECOM_ENC_KEY }}
+          WECOM_CREDENTIALS: ${{ secrets.WECOM_CREDENTIALS }}
+          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+          OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+          OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+        run: |
+          npm install -g @wecom/cli@1.3.2
+          mkdir -p "$HOME/.config/wecom"
+          echo "$WECOM_ENC_KEY" | base64 -d > "$HOME/.config/wecom/.encryption_key"
+          echo "$WECOM_CREDENTIALS" | base64 -d > "$HOME/.config/wecom/credentials.enc"
+          chmod 600 "$HOME/.config/wecom/.encryption_key" "$HOME/.config/wecom/credentials.enc"
+          python3 trade_push.py || true
+
       - name: Persist state (dedup + trade records)
         run: |
           git config user.name "marvis-bot"
           git config user.email "marvis-bot@users.noreply.github.com"
-          git add .fvg_pushed.json .fvg_traded.json daily_trades_*.json 2>/dev/null || git add -A
+          git add .fvg_pushed.json .fvg_traded.json .fills_pushed.json daily_trades_*.json 2>/dev/null || git add -A
           if git diff --cached --quiet; then
             echo "no state change, skip commit"
           else
@@ -118,14 +133,21 @@ jobs:
           req("/api/v5/account/positions", {"instId": "BTC-USDT-SWAP"})
           PY
 
-      - name: Build & push daily report
+      - name: Build & send daily report to personal (wecom-cli)
         env:
+          WECOM_ENC_KEY: ${{ secrets.WECOM_ENC_KEY }}
+          WECOM_CREDENTIALS: ${{ secrets.WECOM_CREDENTIALS }}
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
           OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
           OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
         run: |
-          # 统计北京时间昨日自然日，日报落盘供本地 CLI 直发个人（不再群发）
-          python3 daily_report.py --date "$(TZ=Asia/Shanghai date -d 'yesterday' +%Y-%m-%d)" --save-dir . || true
+          # 统计北京时间昨日自然日，日报直发老板个人（wecom-cli），同时落盘供回溯
+          npm install -g @wecom/cli@1.3.2
+          mkdir -p "$HOME/.config/wecom"
+          echo "$WECOM_ENC_KEY" | base64 -d > "$HOME/.config/wecom/.encryption_key"
+          echo "$WECOM_CREDENTIALS" | base64 -d > "$HOME/.config/wecom/credentials.enc"
+          chmod 600 "$HOME/.config/wecom/.encryption_key" "$HOME/.config/wecom/credentials.enc"
+          python3 daily_report.py --date "$(TZ=Asia/Shanghai date -d 'yesterday' +%Y-%m-%d)" --push-cli --save-dir . || true
 
       - name: Persist daily report
         run: |
