@@ -557,8 +557,8 @@ def _compact_text(day_str, n_open, n_fills, net, realized, fees, upl, n_pos, n_a
         fvg_parts.append(" ".join("{}{} {}个".format(c, iv, n) for (c, iv), n in sorted(fvg_stat.items())))
     fvg_parts.append("已开单{}".format(n_open))
     lines.append("【八、FVG 信号】" + " | ".join(fvg_parts))
-    # 九、系统运行
-    sys_parts = ["{} 生成".format(datetime.now(BJ_TZ).strftime("%H:%M"))]
+    # 九、系统运行（不含时间戳，避免 md5 每轮变化导致刷屏；只随业务数据变化才推送）
+    sys_parts = ["每5分钟自动扫描刷新"]
     if isinstance(gh_runs, list):
         ok = sum(1 for s, _ in gh_runs if s == "success")
         sys_parts.append("Actions {}/{}成功".format(ok, len(gh_runs)))
