@@ -22,6 +22,29 @@ jobs:
       - name: Install deps
         run: pip install requests
 
+      - name: Debug OKX auth (balance probe)
+        env:
+          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+          OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
+          OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, hmac, json, os, time, requests
+          KEY = os.environ["OKX_API_KEY"]; SEC = os.environ["OKX_API_SECRET"]; PAS = os.environ["OKX_API_PASSPHRASE"]
+          ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+          path = "/api/v5/account/balance"
+          msg = ts + "GET" + path + ""
+          sig = base64.b64encode(hmac.new(SEC.encode(), msg.encode(), hashlib.sha256).digest()).decode()
+          h = {"OK-ACCESS-KEY": KEY, "OK-ACCESS-SIGN": sig, "OK-ACCESS-TIMESTAMP": ts,
+               "OK-ACCESS-PASSPHRASE": PAS, "Content-Type": "application/json", "x-simulated-trading": "1"}
+          try:
+              r = requests.get("https://www.okx.com"+path, headers=h, timeout=20)
+              print("HTTP", r.status_code)
+              print(r.text[:800])
+          except Exception as e:
+              print("ERR", type(e).__name__, e)
+          PY
+
       - name: Scan FVG, push wecom & auto trade (OKX demo)
         env:
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
@@ -40,7 +63,7 @@ jobs:
         run: |
           git config user.name "marvis-bot"
           git config user.email "marvis-bot@users.noreply.github.com"
-          git add .fvg_pushed.json .fvg_traded.json daily_trades_*.json
+          git add .fvg_pushed.json .fvg_traded.json daily_trades_*.json 2>/dev/null || git add -A
           if git diff --cached --quiet; then
             echo "no state change, skip commit"
           else
