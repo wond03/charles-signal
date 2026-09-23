@@ -44,6 +44,53 @@ BJ_TZ = timezone(timedelta(hours=8))
 
 _INST_OKX = {"BTC_USDT": "BTC-USDT-SWAP", "XAU_USDT": "XAU-USDT-SWAP"}
 
+NOT_TRIGGERED_FILE = ".not_triggered.json"  # 未触发通知去重（防每轮刷屏）
+
+
+def _load_not_triggered(base_dir):
+    path = os.path.join(base_dir, NOT_TRIGGERED_FILE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_not_triggered(base_dir, state):
+    path = os.path.join(base_dir, NOT_TRIGGERED_FILE)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def notify_not_triggered(contract, desc, reason, base_dir, force=False):
+    """信号已推送但自动开单未执行时，推一条'未触发'企微消息（同 key 去重）。"""
+    import fvg_scanner
+    state = _load_not_triggered(base_dir)
+    key = desc if isinstance(desc, str) and "|" in desc else f"{contract}|{desc}"
+    if not force and state.get(key):
+        return False
+    wh = fvg_scanner.load_webhook()
+    if not wh:
+        print(f"[notify] 未找到 webhook，未触发通知跳过: {key}")
+        return False
+    content = (
+        "# ⚠️ 未触发 · " + contract + "\n\n"
+        f"**信号**：<font color=\"comment\">{desc}</font>\n"
+        f"**状态**：<font color=\"warning\">未触发（{reason}）</font>\n"
+        f"**说明**：信号已推送但自动开单未执行，请人工检查 OKX 持仓。"
+    )
+    try:
+        import requests
+        r = requests.post(wh, json={"msgtype": "markdown", "markdown": {"content": content}}, timeout=10)
+        r.raise_for_status()
+        state[key] = 1
+        _save_not_triggered(base_dir, state)
+        print(f"[notify] 未触发已推送: {key}")
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[notify] 未触发推送失败: {e}")
+        return False
+
 
 def load_traded_state(base_dir):
     """读取状态文件（含旧格式自动迁移）。
@@ -339,12 +386,15 @@ def trade_all_fvgs(contract, intervals, window_start, window_end, min_gap=1.0,
             # 单仓约束：同币种+同方向（跨周期）已有未平仓 → 跳过，防止 OKX 同向合并
             if has_open_position(contract, direction, state):
                 print(f"[trade] 跳过: {contract} {direction} 已有未平仓(单仓约束,不限周期)")
+                notify_not_triggered(contract, sig_key, "同方向持仓中，单仓约束跳过开单", base_dir)
                 continue
             f2 = dict(f)
             f2["interval"] = interval
             print(f"[trade] 发现新FVG: {contract} {interval} {f['time']} {f['type']}")
             r = open_position(contract, f2, base_dir, dry_run=dry_run)
             opened.append({"key": sig_key, "result": r})
+            if not r.get("ok") and not dry_run:
+                notify_not_triggered(contract, sig_key, f"开单失败: {r.get('reason')}", base_dir)
             if r.get("ok") and not dry_run:  # 仅真实开单成功才记录，失败/演练保留以便下轮重试
                 state["opened_signals"][sig_key] = 1
                 pos_key = f"{contract}|{direction}"
@@ -389,8 +439,14 @@ def main():
         window_start, window_end = fvg_scanner.get_window(now_bj)
 
     print(f"[trade] 窗口: {window_start:%Y-%m-%d %H:%M} ~ {window_end:%Y-%m-%d %H:%M} (北京时间)")
-    res = trade_all_fvgs(args.contract, intervals, window_start, window_end,
-                         args.min_gap, base_dir=base_dir, dry_run=args.dry_run)
+    try:
+        res = trade_all_fvgs(args.contract, intervals, window_start, window_end,
+                             args.min_gap, base_dir=base_dir, dry_run=args.dry_run)
+    except Exception as e:  # noqa: BLE001
+        print(f"[trade] 开单流程异常: {type(e).__name__}: {e}", file=sys.stderr)
+        notify_not_triggered(args.contract, f"{args.contract} 开单流程异常",
+                             f"{type(e).__name__}: {e}", base_dir)
+        raise
     print(f"[trade] 新开单数: {res['new_count']}")
     for item in res["opened"]:
         r = item["result"]
