@@ -55,8 +55,20 @@ jobs:
           python3 fvg_scanner.py --contract BTC_USDT --push || true
           python3 fvg_scanner.py --contract XAU_USDT --push || true
           # 自动开单（不限制信号/次数/周期，BTC 100x / XAU 50x，5U/单，RR 1:2）
-          python3 trader.py --contract BTC_USDT --intervals 1h,15m,5m || true
-          python3 trader.py --contract XAU_USDT --intervals 1h,15m,5m || true
+          # trader 崩溃时显式推送企微告警，禁止静默吞错（旧版 || true 掩盖致命故障）
+          set +e
+          python3 trader.py --contract BTC_USDT --intervals 1h,15m,5m
+          BTC_RC=$?
+          python3 trader.py --contract XAU_USDT --intervals 1h,15m,5m
+          XAU_RC=$?
+          set -e
+          if [ $BTC_RC -ne 0 ] || [ $XAU_RC -ne 0 ]; then
+            echo "::error::trader.py 崩溃退出 BTC_RC=$BTC_RC XAU_RC=$XAU_RC，已推送告警"
+            curl -s -X POST "$WECOM_WEBHOOK" -H 'Content-Type: application/json' \
+              -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"**⚠️ trader 崩溃告警**\\n> 开单进程异常退出（BTC_RC=\`$BTC_RC\` / XAU_RC=\`$XAU_RC\`），请立即查看 Actions 日志排查，OKX 可能未实际开单\"}}" || true
+          else
+            echo "trader.py 正常退出"
+          fi
 
       - name: Refresh realtime daily report & push to personal
         env:
