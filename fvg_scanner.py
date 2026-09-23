@@ -346,44 +346,33 @@ def estimate_net_pnl(entry_price, tp, f_type, notional, taker_fee=0.0005):
 
 
 def open_tpl_block(contract, f, entry_price):
-    """开仓模板 markdown 区块（杠杆/单笔/SL/TP/仓位，与 trader.py 参数一致）。"""
+    """简化开仓区块（老板模板）：开仓/入场/止损/止盈/强平价，分隔线美化。"""
     lev = LEVERAGE.get(contract, 100)
     sl, tp = compute_sltp(entry_price, f["type"], f["bottom"], f["top"])
     side = "多" if f["type"] == "bullish" else "空"
-    notional = TRADE_SIZE_USDT * lev
-    qty_est = notional / entry_price if entry_price else 0.0
+    dir_color = "info" if f["type"] == "bullish" else "warning"
     mmr, taker_fee = okx_params(contract)
     liq = estimate_liq(entry_price, f["type"], lev, mmr, taker_fee)
-    net, fee = estimate_net_pnl(entry_price, tp, f["type"], notional, taker_fee)
     return (
-        "\n────────────\n"
-        f"**开仓模板**：{contract} · {side} {lev}x · 单笔 {TRADE_SIZE_USDT:.0f}U 保证金\n"
-        f"**触发方式**：市价（推送即开单）\n"
-        f"**收盘确认**：是（K线收盘后扫描）\n"
-        f"**入场参考**：<font color=\"comment\">{entry_price:.4f}</font>（最新价）\n"
-        f"**止损**：<font color=\"warning\">{sl}</font>（缺口边界，无缓冲）\n"
-        f"**止盈**：<font color=\"info\">{tp}</font>（RR 1:{RR:.0f}）\n"
-        f"**强平价**：≈{liq}（OKX 模拟盘：维持保证金率 {mmr*100:.2f}%，taker {taker_fee*100:.3f}%）\n"
-        f"**名义价值**：≈{notional:.0f}U · 数量 ≈{qty_est:.6f}\n"
-        f"**预估净盈亏（止盈）**：≈{net:+.2f}U（毛利减双边手续费≈{fee:.2f}U，OKX 模拟盘 taker {taker_fee*100:.3f}%）\n"
-        f"**风险提示**：{lev}x 杠杆风险极高，滑点与手续费可能显著影响小止损单"
+        "\n━━━━━━━━━━━━\n"
+        f"开仓：<font color=\"{dir_color}\">{side} {lev}x</font> ｜ {TRADE_SIZE_USDT:.0f}U保证金 ｜ 市价\n"
+        f"入场：<font color=\"comment\">{entry_price:.4f}</font>（最新价）\n"
+        f"止损：<font color=\"warning\">{sl}</font>（缺口边界）\n"
+        f"止盈：<font color=\"info\">{tp}</font>（RR 1:{RR:.0f}）\n"
+        f"强平价：<font color=\"comment\">≈{liq}</font>\n"
+        "━━━━━━━━━━━━"
     )
 
 
 def send_single(webhook, contract, interval, f, entry_price):
-    """单个 FVG 推送一条企业微信 markdown 消息（含周期、时间、开仓模板）。"""
-    arrow = "▲ 看涨" if f["type"] == "bullish" else "▼ 看跌"
+    """单个 FVG 推送一条企业微信 markdown 消息（简化模板）。"""
+    arrow = "▲ 多" if f["type"] == "bullish" else "▼ 空"
     color = _color_for(f)
     content = (
-        f"# 🔔 FVG 信号 · {contract}\n\n"
-        f"**时间**：<font color=\"comment\">{f['time']}（UTC+8）</font>\n"
-        f"**周期**：{interval.upper()}\n"
-        f"**方向**：<font color=\"{color}\">{arrow}</font>\n"
-        f"**区间**：`{f['bottom']} ~ {f['top']}`\n"
-        f"**信号 ID**：{signal_id(contract, f)}\n"
-        f"**状态**：已触发（推送后自动开单）\n"
-        f"**有效期**：即时开单（本周期收盘前信号有效）\n"
-        f"**FVG 回补**：未检测（回补检测未上线）"
+        f"🔔 {contract}\n\n"
+        f"时间：<font color=\"comment\">{f['time']}（UTC+8）</font>\n"
+        f"周期：{interval.upper()} ｜ 方向：<font color=\"{color}\">{arrow}</font> ｜ 状态：已触发\n"
+        f"区间：`{f['bottom']} ~ {f['top']}`"
         + open_tpl_block(contract, f, entry_price)
     )
     payload = {"msgtype": "markdown", "markdown": {"content": content}}
@@ -393,19 +382,19 @@ def send_single(webhook, contract, interval, f, entry_price):
 
 
 def send_resonance(webhook, contract, time_str, items, entry_price):
-    """多周期同一时间的 FVG 合并为一条共振消息（多周期共振）。"""
-    lines = [f"# ⚡ FVG 共振 · {contract}", "",
-             f"**时间**：<font color=\"comment\">{time_str}（UTC+8）</font>",
-             f"**信号 ID**：{signal_id(contract, items[0][1])}",
-             f"**状态**：已触发（推送后自动开单）",
-             f"**有效期**：即时开单（本周期收盘前信号有效）",
-             f"**FVG 回补**：未检测（回补检测未上线）", ""]
+    """多周期同一时间的 FVG 合并为一条共振消息（简化模板）。"""
+    f0 = items[0][1]
+    arrow = "▲ 多" if f0["type"] == "bullish" else "▼ 空"
+    color = _color_for(f0)
+    itv_str = "+".join(itv.upper() for itv, _ in items)
+    lines = [f"⚡ {contract} 共振", "",
+             f"时间：<font color=\"comment\">{time_str}（UTC+8）</font>",
+             f"周期：{itv_str} ｜ 方向：<font color=\"{color}\">{arrow}</font> ｜ 状态：已触发",
+             "区间："]
     for interval, f in items:
-        arrow = "▲ 看涨" if f["type"] == "bullish" else "▼ 看跌"
-        color = _color_for(f)
-        lines.append(f"> **{interval.upper()}** <font color=\"{color}\">{arrow}</font> · `{f['bottom']} ~ {f['top']}`")
-    lines += ["", "多周期共振，信号增强"]
-    lines.append(open_tpl_block(contract, items[0][1], entry_price))
+        fcolor = _color_for(f)
+        lines.append(f"- {interval.upper()}：<font color=\"{fcolor}\">`{f['bottom']} ~ {f['top']}`</font>")
+    lines.append(open_tpl_block(contract, f0, entry_price))
     payload = {"msgtype": "markdown", "markdown": {"content": "\n".join(lines)}}
     r = requests.post(webhook, json=payload, timeout=TIMEOUT)
     r.raise_for_status()
