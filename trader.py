@@ -5,7 +5,8 @@ FVG 信号自动交易模块（OKX Demo 模拟盘）
 ========================================
 策略规则（按老板设定）：
   - 每次扫描出的 FVG 信号都开单，不限制信号数、不限制交易次数
-  - 单仓约束：同一币种 + 同一方向 + 同一周期，已有未平仓则跳过新信号（平仓后可再开）
+  - 单仓约束：同一币种 + 同一方向（不限周期），已有未平仓则跳过新信号（平仓后可再开）
+  - 同方向不叠加：防止 OKX 同向加仓导致仓位合并
   - 杠杆：BTC 100x / XAU 50x
   - 盈亏比 1:2（TP 距离 = 2 × SL 距离）
   - 固定每次下单金额 5U
@@ -71,7 +72,7 @@ def load_traded_state(base_dir):
         for k, v in d.items():
             if isinstance(k, str) and len(k.split("|")) == 3:
                 opened[k] = 1
-        # 从 daily_trades 账本补建 positions（每 合约|周期|方向 取最新一笔），
+        # 从 daily_trades 账本补建 positions（每 合约|方向 取最新一笔），
         # 使单仓约束在旧状态迁移后立即生效；对账会随后修正已平仓位
         positions = {}
         for day_path in sorted(glob.glob(os.path.join(base_dir, "daily_trades_*.json"))):
@@ -84,18 +85,20 @@ def load_traded_state(base_dir):
                 continue
             for rec in rows:
                 c = rec.get("contract")
-                itv = rec.get("interval")
                 dr = rec.get("direction")
-                if not c or not itv or dr not in ("long", "short"):
+                if not c or dr not in ("long", "short"):
                     continue
-                pkey = f"{c}|{itv}|{dr}"
-                positions[pkey] = {
-                    "status": "open",
-                    "algo_id": str(rec.get("algo_id") or ""),
-                    "qty": rec.get("qty", 0),
-                    "time": rec.get("time", ""),
-                    "entry": rec.get("entry_ref", 0),
-                }
+                pkey = f"{c}|{dr}"
+                prev = positions.get(pkey)
+                t = rec.get("time", "")
+                if prev is None or t > (prev.get("time") or ""):
+                    positions[pkey] = {
+                        "status": "open",
+                        "algo_id": str(rec.get("algo_id") or ""),
+                        "qty": rec.get("qty", 0),
+                        "time": t,
+                        "entry": rec.get("entry_ref", 0),
+                    }
         return {"positions": positions, "opened_signals": opened}
     positions = d.get("positions")
     opened = d.get("opened_signals")
@@ -294,15 +297,27 @@ def reconcile_positions(base_dir, contract, dry_run=False):
         save_traded_state(base_dir, state)
 
 
-def has_open_position(contract, interval, direction, state):
-    """单仓约束：同币种+同方向+同周期是否已有未平仓。"""
-    rec = state["positions"].get(f"{contract}|{interval}|{direction}")
-    return isinstance(rec, dict) and rec.get("status") == "open"
+def has_open_position(contract, direction, state):
+    """单仓约束：同品种+同方向（不限周期）是否已有未平仓。
+
+    兼容新旧两种状态 key：
+      - 新格式: 合约|方向（如 XAU_USDT|long）
+      - 旧格式: 合约|周期|方向（如 XAU_USDT|5m|long，迁移残留）
+    """
+    for key, rec in state["positions"].items():
+        if not isinstance(rec, dict) or rec.get("status") != "open":
+            continue
+        parts = key.split("|")
+        if len(parts) == 3 and parts[0] == contract and parts[2] == direction:
+            return True
+        if len(parts) == 2 and parts[0] == contract and parts[1] == direction:
+            return True
+    return False
 
 
 def trade_all_fvgs(contract, intervals, window_start, window_end, min_gap=1.0,
                    base_dir=None, dry_run=False):
-    """扫描 FVG 并对新信号开单（单仓约束：同币种+同方向+同周期不重复开）。
+    """扫描 FVG 并对新信号开单（单仓约束：同币种+同方向不重复开，不限周期）。
     返回开单汇总。"""
     import fvg_scanner
     result = fvg_scanner.scan(contract, intervals, window_start, window_end, min_gap)
@@ -319,9 +334,9 @@ def trade_all_fvgs(contract, intervals, window_start, window_end, min_gap=1.0,
             sig_key = f"{contract}|{interval}|{f['time']}"
             if state["opened_signals"].get(sig_key):
                 continue  # 已开单，跳过
-            # 单仓约束：同币种+同方向+同周期已有未平仓 → 跳过
-            if has_open_position(contract, interval, direction, state):
-                print(f"[trade] 跳过: {contract} {interval} {direction} 已有未平仓(单仓约束)")
+            # 单仓约束：同币种+同方向（跨周期）已有未平仓 → 跳过，防止 OKX 同向合并
+            if has_open_position(contract, direction, state):
+                print(f"[trade] 跳过: {contract} {direction} 已有未平仓(单仓约束,不限周期)")
                 continue
             f2 = dict(f)
             f2["interval"] = interval
@@ -330,7 +345,7 @@ def trade_all_fvgs(contract, intervals, window_start, window_end, min_gap=1.0,
             opened.append({"key": sig_key, "result": r})
             if r.get("ok") and not dry_run:  # 仅真实开单成功才记录，失败/演练保留以便下轮重试
                 state["opened_signals"][sig_key] = 1
-                pos_key = f"{contract}|{interval}|{direction}"
+                pos_key = f"{contract}|{direction}"
                 state["positions"][pos_key] = {
                     "status": "open",
                     "algo_id": (r.get("algo") or {}).get("algoId", ""),
