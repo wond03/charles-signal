@@ -283,7 +283,9 @@ def reconcile_positions(base_dir, contract, dry_run=False):
         rec = positions[k]
         if not isinstance(rec, dict) or rec.get("status") != "open":
             continue
-        direction = k.split("|")[2]
+        parts = k.split("|")
+        # 兼容新旧两种格式：合约|方向（2段） 与 合约|周期|方向（3段，迁移残留）
+        direction = parts[1] if len(parts) == 2 else parts[2]
         algo_id = str(rec.get("algo_id") or "")
         if poss_ok and pos_by_dir.get(direction, 0) == 0:
             rec["status"] = "closed"
