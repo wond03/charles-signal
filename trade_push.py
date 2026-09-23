@@ -115,6 +115,8 @@ def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     state = load_pushed(base_dir)
     fills = fetch_recent_fills()
+    # 首次运行（无状态文件）只建立基线不推送，避免把历史成交全部刷屏
+    first_run = not os.path.exists(os.path.join(base_dir, PUSHED_STATE_FILE))
     new_items = []
     for o in fills:
         tid = o.get("tradeId")
@@ -122,7 +124,13 @@ def main():
             continue
         state[tid] = {"ts": o.get("ts"), "inst": o.get("instId"),
                       "side": o.get("side"), "posSide": o.get("posSide")}
-        new_items.append(o)
+        if not first_run:
+            new_items.append(o)
+
+    if first_run:
+        save_pushed(base_dir, state)
+        print(f"[info] 首次初始化基线 {len(state)} 笔，不推送")
+        return
 
     if not new_items:
         print("[info] 无新增成交")
