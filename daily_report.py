@@ -41,7 +41,7 @@ WECOM_CLI = (os.environ.get("WECOM_CLI")
              or "/home/marvis/.npm-global/bin/wecom-cli")
 
 _INST_OKX = {"BTC_USDT": "BTC-USDT-SWAP", "XAU_USDT": "XAU-USDT-SWAP"}
-_STRATEGY = "森林查尔斯 FVG 三K线缺口策略"
+_STRATEGY = "FVG 三K线缺口策略"
 _PARAMS = "gap>=1.0 | 窗口 08:00~次日05:00(北京时间) | BTC 100x / XAU 50x | 单笔5U | RR 1:2"
 
 
@@ -467,7 +467,7 @@ def build_report(day_str, dry=False, base_dir=".", compact=False):
     lines.append("- 参数调整：无（如需调整杠杆/单笔/RR 请告知）")
     lines.append("- 风险提醒：模拟盘 5U/单，当前仅手续费消耗；实盘前务必核对持仓与接口")
     lines.append("")
-    lines.append("> 模拟盘自动交易 · 森林查尔斯 FVG 策略")
+    lines.append("> 模拟盘自动交易 · FVG 三K线缺口策略")
 
     text = "\n".join(lines)
     if compact:
