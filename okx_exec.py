@@ -200,7 +200,8 @@ def _contract_qty(size_usdt: float, price: float, inst: str, leverage: int = 100
     if price <= 0 or ct_val <= 0:
         raise OkxError(f"换算张数失败: size={size_usdt} price={price} ctVal={ct_val}")
     notional_per_ct = price * ct_val
-    qty = size_usdt / notional_per_ct
+    # size_usdt 为成本(保证金)，名义金额 = 成本 × 杠杆，张数 = 名义 / 单张价值
+    qty = size_usdt * leverage / notional_per_ct
     lot = spec["lotSz"]
     if lot and lot > 0:
         import math
