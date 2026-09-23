@@ -465,7 +465,11 @@ def build_report(day_str, dry=False, base_dir=".", compact=False):
         # 共振组合分布
         lines.append("共振组合分布")
         reso_pos_stat = {}
+        reso_pos_triple_n, reso_pos_triple_pnl = 0, 0.0
         for r in reso_list:
+            if r.get("triple"):
+                reso_pos_triple_n += 1
+                reso_pos_triple_pnl += r["pnl"] or 0.0
             st = reso_pos_stat.setdefault(r["combo"], {"n": 0, "pnl": 0.0})
             st["n"] += 1
             st["pnl"] += r["pnl"] or 0.0
@@ -482,6 +486,24 @@ def build_report(day_str, dry=False, base_dir=".", compact=False):
                 lines.append(f"{combo} 0笔 | 胜负 -/- | 盈亏 - | 胜率 -")
             else:
                 lines.append(f"{combo} {total_n}笔 | 胜负 {wins}/{losses} | 盈亏 {pnl:+.2f} | 胜率 {wr:.0f}%")
+        # 三周期及以上汇总（intervals>=3，兼容 4H 参与的组合）
+        cst = {"n": 0, "wins": 0, "losses": 0, "realized": 0.0, "fee": 0.0}
+        for combo, st in reso_closed_stats.items():
+            if len(combo.split("+")) >= 3:
+                cst["n"] += st["n"]
+                cst["wins"] += st["wins"]
+                cst["losses"] += st["losses"]
+                cst["realized"] += st["realized"]
+                cst["fee"] += st["fee"]
+        total_n = cst["n"] + reso_pos_triple_n
+        wins = cst["wins"]
+        losses = cst["losses"]
+        pnl = cst["realized"] + cst["fee"] + reso_pos_triple_pnl
+        wr = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
+        if total_n == 0:
+            lines.append("三周期 0笔 | 胜负 -/- | 盈亏 - | 胜率 -")
+        else:
+            lines.append(f"三周期 {total_n}笔 | 胜负 {wins}/{losses} | 盈亏 {pnl:+.2f} | 胜率 {wr:.0f}%")
         lines.append("")
 
         # 盈亏拆解
