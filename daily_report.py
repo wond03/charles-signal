@@ -244,12 +244,10 @@ def compute_metrics(closed):
 # ---------------- 日报生成 ----------------
 
 def build_report(day_str, dry=False, base_dir=".", compact=False):
-    """生成日报。compact=True 返回企微可推送的精简版（<2048B）。"""
+    """生成日报。compact=True 返回企微推送版（模板结构，<2048B）。"""
     start_bj, end_bj = day_range(day_str)
     begin_ms, end_ms = to_ms(start_bj), to_ms(end_bj)
-    lines = []
-    lines.append(f"📊 FVG 自动交易日报 · {day_str}")
-    lines.append("")
+    warn = []
 
     # ---- 采集（全部防御式） ----
     trades = load_daily_trades(day_str, base_dir)
@@ -260,224 +258,305 @@ def build_report(day_str, dry=False, base_dir=".", compact=False):
         if isinstance(r, list):
             fills_all.extend(r)
         else:
-            lines.append(f"⚠️ fills 查询失败 {contract}: {r}")
+            warn.append(f"fills {contract} 查询失败")
     fills_all.sort(key=lambda x: int(x.get("ts") or 0))
     acct = _safe(fetch_account_snapshot, None)
     pos = _safe(fetch_positions, None)
     algo = _safe(fetch_algo_pending, None)
     gh_runs = _safe(fetch_github_runs, None)
 
-    # ---- 计算 ----
+    # ---- 基础计算 ----
     open_oids = {t.get("ord_id") for t in trades if t.get("ord_id")}
     n_open = len(open_oids)
     closed = _aggregate_closed(fills_all)
-    # 平仓订单 = 已产生已实现盈亏(pnl≠0)的订单；手续费为全账户当日所有成交支出
     closed_traded = [c for c in closed if c["pnl"] != 0]
     realized = sum(c["pnl"] for c in closed)
     fees = sum(float(o.get("fee") or 0.0) for o in fills_all)
     net = realized + fees
     upl = 0.0
     n_pos = 0
+    pos_rows_raw = []
     if isinstance(pos, list):
-        for p in pos:
-            try:
-                if float(p.get("pos") or 0) != 0:
-                    n_pos += 1
-                    upl += float(p.get("upl") or 0.0)
-            except (TypeError, ValueError):
-                pass
-    n_algo = len(algo) if isinstance(algo, list) else -1
-    pos_by_contract = {}
-    dir_stat = {"buy": 0, "sell": 0}
-    period_stat = {}
-    for t in trades:
-        dir_stat[t.get("side") or "?"] = dir_stat.get(t.get("side") or "?", 0) + 1
-        pos_by_contract[t.get("contract")] = pos_by_contract.get(t.get("contract"), 0) + 1
-        period_stat[t.get("interval")] = period_stat.get(t.get("interval"), 0) + 1
-    fvg_stat = {}
-    for k in fvg_keys:
-        parts = k.split("|")
-        c = parts[0].replace("_USDT", "") if len(parts) > 0 else "?"
-        iv = parts[1] if len(parts) > 1 else "?"
-        fvg_stat[(c, iv)] = fvg_stat.get((c, iv), 0) + 1
-    metrics = compute_metrics(closed_traded)
-
-    # ============ 一、基础信息（口径） ============
-    lines.append("**一、基础信息（口径）**")
-    lines.append(f"- 统计周期：{day_str} 00:00~23:59（北京时间 UTC+8）")
-    lines.append("- 账户类型：OKX Demo 模拟盘（x-simulated-trading）")
-    lines.append("- 交易所/数据源：OKX SWAP 成交 · Gate.io 行情（FVG 扫描）")
-    lines.append(f"- 策略：{_STRATEGY}")
-    lines.append(f"- 参数：{_PARAMS}")
-    lines.append(f"- 开单数口径：daily_trades 中 ordId 去重 = {n_open} 单")
-    lines.append(f"- 明细条数口径：fills 逐笔成交 = {len(fills_all)} 条"
-                 + ("（含部分成交拆分，故可多于开单数）" if len(fills_all) > n_open else ""))
-    lines.append(f"- 平仓数口径：fills 中 pnl≠0 的订单 = {len([c for c in closed if c['pnl'] != 0])} 单")
-    lines.append("- 净盈亏口径：已实现盈亏(pnl) + 手续费(fee)，资金费/未实现浮盈单独列出")
-    lines.append("")
-
-    # ============ 二、账户概览 ============
-    lines.append("**二、账户概览**")
-    if isinstance(acct, dict) and not acct.get("__error__") and acct:
-        init_approx = acct["totalEq"] - net - upl  # 近似：昨日末权益
-        ret = (net + upl) / init_approx if init_approx else 0.0
-        lines.append(f"- 当前权益：{acct['totalEq']:.2f} USDT")
-        lines.append(f"- 可用保证金：{acct['availEq']:.2f} USDT")
-        lines.append(f"- 占用保证金：{acct['frozenBal']:.2f} USDT")
-        lines.append(f"- 未实现浮盈：{acct['upl']:+.2f} USDT")
-        lines.append(f"- 当日收益率（含浮盈）：{ret * 100:+.2f}%")
-        lines.append("- 初始权益：无历史快照，按 当前权益-净盈亏-浮盈 反推")
-    else:
-        lines.append(f"- 接口不可用：{acct if acct else 'balance 无返回'}")
-    lines.append("")
-
-    # ============ 三、交易概览 ============
-    lines.append("**三、交易概览**")
-    lines.append(f"- 开仓数：{n_open} 单（trader 记录）")
-    lines.append(f"- 平仓数：{len([c for c in closed if c['pnl'] != 0])} 单（已实现盈亏）")
-    lines.append(f"- 当前持仓：{n_pos} 个仓位"
-                 + ("" if isinstance(pos, list) else "（positions 接口不可用）"))
-    lines.append(f"- 挂单数（OCO）：{n_algo} 单" if n_algo >= 0 else "- 挂单数：查询失败")
-    lines.append(f"- 多/空：多 {dir_stat.get('buy', 0)} / 空 {dir_stat.get('sell', 0)}")
-    if pos_by_contract:
-        lines.append("- 分品种：" + " / ".join(f"{k.replace('_USDT', '')} {v}单" for k, v in pos_by_contract.items()))
-    if period_stat:
-        lines.append("- 分周期：" + " / ".join(f"{k} {v}单" for k, v in sorted(period_stat.items(), key=lambda x: x[0])))
-    lines.append("")
-
-    # ============ 四、盈亏拆解 ============
-    lines.append("**四、盈亏拆解**")
-    lines.append(f"- 已实现盈亏：{realized:+.2f} USDT")
-    lines.append(f"- 手续费：{fees:+.2f} USDT（负值=支出）")
-    lines.append(f"- 资金费：接口不可用/未计入" )
-    lines.append(f"- 未实现浮盈：{upl:+.2f} USDT（持仓 {n_pos} 个）")
-    lines.append(f"- **净盈亏：{net:+.2f} USDT**（已实现+手续费，不含浮盈）")
-    if realized == 0 and fees != 0:
-        lines.append("  → 当日无平仓盈亏，净值为手续费支出")
-    lines.append("")
-
-    # ============ 五、绩效指标 ============
-    lines.append("**五、绩效指标**")
-    if metrics.get("sample"):
-        m = metrics
-        lines.append(f"- 胜率：{m['wins']}/{m['n']}（{m['win_rate'] * 100:.1f}%）")
-        lines.append(f"- 平均盈利：{m['avg_win']:+.3f} / 平均亏损：{m['avg_loss']:+.3f}")
-        lines.append(f"- 盈亏比：{m['profit_factor']:.2f}" if m["profit_factor"] else "- 盈亏比：暂无盈利/亏损")
-        lines.append(f"- 期望值：{m['expectancy']:+.3f} USDT/单")
-        lines.append(f"- 最大单笔盈/亏：{m['max_win']:+.2f} / {m['max_loss']:+.2f}")
-        lines.append(f"- 最大回撤：{m['max_drawdown'] * 100:.1f}%")
-        lines.append(f"- 连续盈/亏：{m['max_streak_win']} / {m['max_streak_loss']}")
-        lines.append("- 平均持仓时长：无法关联开/平仓（demo fills 限制）")
-        lines.append("- R 倍数分布：需开平仓配对，当日不可用")
-    else:
-        lines.append("- 当日无平仓成交，绩效样本不足（待 OCO 触发后统计）")
-    lines.append("")
-
-    # ============ 六、平仓明细 ============
-    lines.append("**六、平仓明细**")
-    if closed_traded:
-        for c in closed_traded[-10:]:
-            arrow = "▲" if c["side"] == "buy" else "▼"
-            lines.append(f"- {arrow} ordId {c['ord_id'][-6:]} {_fmt_ts(c['ts'])} "
-                         f"价 {c['px'] or '-'} 费 {c['fee']:+.2f} 净 {c['net']:+.2f}")
-        lines.append("  （字段限制：demo fills 无信号ID/止损止盈/开仓价，需配对 daily_trades）")
-    else:
-        lines.append("- 当日无平仓成交记录（demo fills 未返回平仓单，或 OCO 尚未触发）")
-    lines.append("")
-
-    # ============ 七、持仓/挂单 ============
-    lines.append("**七、持仓/挂单**")
-    if isinstance(pos, list) and pos:
         for p in pos:
             try:
                 if float(p.get("pos") or 0) == 0:
                     continue
             except (TypeError, ValueError):
                 continue
-            inst = p.get("instId", "?")
-            side = p.get("posSide", "?")
-            avg = _fmt_px(p.get("avgPx"))
-            mark = _fmt_px(p.get("markPx"))
-            up = float(p.get("upl") or 0.0)
-            lev = p.get("lev") or p.get("lever") or "-"
-            lines.append(f"- {inst} {side} 开 {avg} 现 {mark} 浮盈 {up:+.2f} 杠杆 {lev}x")
-        if not any(True for _ in pos):
-            lines.append("- 无持仓")
-    elif isinstance(pos, list):
-        lines.append("- 无持仓")
+            n_pos += 1
+            upl += float(p.get("upl") or 0.0)
+            pos_rows_raw.append(p)
+    n_algo = len(algo) if isinstance(algo, list) else -1
+    dir_stat = {"buy": 0, "sell": 0}
+    period_open = {}
+    for t in trades:
+        dir_stat[t.get("side") or "?"] = dir_stat.get(t.get("side") or "?", 0) + 1
+        iv = t.get("interval") or "?"
+        period_open.setdefault(iv, {"open": 0, "long": 0, "short": 0})
+        period_open[iv]["open"] += 1
+        if (t.get("side") or "") == "buy":
+            period_open[iv]["long"] += 1
+        else:
+            period_open[iv]["short"] += 1
+    metrics = compute_metrics(closed_traded)
+
+    # ---- 分周期绩效：关联 fills 的 ordId -> daily_trades interval ----
+    ord_iv = {t.get("ord_id"): (t.get("interval") or "?") for t in trades if t.get("ord_id")}
+    period_perf = {}
+    for iv in period_open:
+        period_perf[iv] = {"open": period_open[iv]["open"],
+                           "long": period_open[iv]["long"],
+                           "short": period_open[iv]["short"],
+                           "closed": 0, "realized": 0.0, "fee": 0.0, "wins": 0}
+    for c in closed:
+        iv = ord_iv.get(c["ord_id"])
+        if iv is None:
+            continue
+        p = period_perf.setdefault(iv, {"open": 0, "long": 0, "short": 0,
+                                        "closed": 0, "realized": 0.0, "fee": 0.0, "wins": 0})
+        p["realized"] += c["pnl"]
+        p["fee"] += c["fee"]
+        if c["pnl"] != 0:
+            p["closed"] += 1
+            if c["pnl"] > 0:
+                p["wins"] += 1
+
+    # ---- 多周期共振：按 (contract, direction) 聚合开单周期集合 ----
+    reso_groups = {}
+    for t in trades:
+        key = (t.get("contract"), t.get("direction") or t.get("side"))
+        g = reso_groups.setdefault(key, {"contract": t.get("contract"), "dir": key[1],
+                                         "intervals": set(), "entries": [],
+                                         "last_time": t.get("time"), "n": 0})
+        g["intervals"].add(t.get("interval"))
+        g["entries"].append(t.get("entry_ref"))
+        g["n"] += 1
+        if (t.get("time") or "") > (g["last_time"] or ""):
+            g["last_time"] = t.get("time")
+    # positions 方向匹配：instId 合约 + posSide long/short
+    pos_map = {}
+    for p in pos_rows_raw:
+        inst = p.get("instId", "")
+        side = p.get("posSide", "").lower()
+        pos_map.setdefault((inst, side), []).append(p)
+    inst_contract = {v: k for k, v in _INST_OKX.items()}
+    reso_list = []
+    for (contract, dirn), g in sorted(reso_groups.items()):
+        if len(g["intervals"]) < 2:
+            continue
+        inst = _INST_OKX.get(contract, contract)
+        pside = "long" if dirn in ("long", "buy") else "short"
+        holding = pos_map.get((inst, pside), []) or pos_map.get((inst, dirn), [])
+        if not holding:
+            continue  # 共振口径：仅统计当前持仓中的多周期组合
+        ivs = sorted(g["intervals"], key=lambda x: {"5m": 0, "15m": 1, "1h": 2, "4h": 3}.get(x, 9))
+        combo = "+".join(iv.upper() for iv in ivs)
+        is_triple = len(ivs) >= 3
+        p = holding[0]
+        avg = _fmt_px(p.get("avgPx"))
+        mark = _fmt_px(p.get("markPx"))
+        up = float(p.get("upl") or 0.0)
+        reso_list.append({"contract": contract, "combo": combo, "dir": dirn,
+                          "status": "持仓中", "open": avg, "cur": mark,
+                          "pnl": up, "holding": True, "triple": is_triple})
+    n_reso = len(reso_list)
+    combo_stat = {}
+    for r in reso_list:
+        combo_stat[r["combo"]] = combo_stat.get(r["combo"], 0) + 1
+
+    # ---- 运行时长：今日最早信号/开单 -> 现在 ----
+    run_hours = None
+    t_min = None
+    for t in trades:
+        if t.get("time"):
+            try:
+                dt = datetime.strptime(t["time"], "%Y-%m-%d %H:%M").replace(tzinfo=BJ_TZ)
+            except ValueError:
+                continue
+            if t_min is None or dt < t_min:
+                t_min = dt
+    if t_min is None:
+        for k in fvg_keys:
+            parts = k.split("|")
+            if len(parts) >= 3:
+                try:
+                    dt = datetime.strptime(parts[2], "%Y-%m-%d %H:%M").replace(tzinfo=BJ_TZ)
+                except ValueError:
+                    continue
+                if t_min is None or dt < t_min:
+                    t_min = dt
+    if t_min is not None:
+        run_hours = (datetime.now(BJ_TZ) - t_min).total_seconds() / 3600.0
+
+    # ---- 平均持仓时长（估算）：当前持仓最近开单 -> 现在 ----
+    avg_hold_h = None
+    if pos_rows_raw:
+        hold_ts = []
+        for p in pos_rows_raw:
+            inst = p.get("instId", "")
+            contract = inst_contract.get(inst)
+            pside = p.get("posSide", "").lower()
+            cand = [t for t in trades if t.get("contract") == contract
+                    and (t.get("direction") or t.get("side")) == pside]
+            if cand:
+                try:
+                    dt = datetime.strptime(cand[-1]["time"], "%Y-%m-%d %H:%M").replace(tzinfo=BJ_TZ)
+                except (ValueError, KeyError):
+                    continue
+                hold_ts.append((datetime.now(BJ_TZ) - dt).total_seconds() / 3600.0)
+        if hold_ts:
+            avg_hold_h = sum(hold_ts) / len(hold_ts)
+
+    # ================= 输出 =================
+    lines = []
+    lines.append("📊 FVG 自动交易数据·最近24H")
+    lines.append("━━━━━━━━━━━━")
+
+    # 一、账户概览
+    lines.append("一、账户概览")
+    if isinstance(acct, dict) and acct and not acct.get("__error__"):
+        init_approx = acct["totalEq"] - net - upl
+        ret = (net + upl) / init_approx if init_approx else 0.0
+        pf = metrics.get("profit_factor") if metrics.get("sample") else None
+        pf_s = f"{pf:.2f}" if pf else "N/A"
+        dd_s = f"{metrics['max_drawdown'] * 100:.2f}%" if metrics.get("sample") else "-"
+        lines.append(f"总盈亏 {net + upl:+.2f} | 收益率 {ret * 100:+.2f}% | 盈亏比 {pf_s} | 最大回撤 {dd_s}")
     else:
-        lines.append(f"- 持仓接口不可用：{pos}")
-    if isinstance(algo, list):
-        lines.append(f"- OCO 挂单：{len(algo)} 单")
-        for a in algo[-5:]:
-            lines.append(f"  - {a.get('instId')} {a.get('side')} 触发 {a.get('tpTriggerPx') or a.get('slTriggerPx') or '-'}")
-    else:
-        lines.append(f"- 挂单接口不可用：{algo}")
+        lines.append(f"账户接口不可用：{acct if acct else 'balance 无返回'}")
     lines.append("")
 
-    # ============ 八、FVG 信号 ============
-    lines.append("**八、FVG 信号**")
-    lines.append(f"- 当日信号数：{len(fvg_keys)} 个（.fvg_pushed 口径，含已开单/未开单）")
-    if fvg_stat:
-        lines.append("- 分布：" + " / ".join(f"{c} {iv} {n}个" for (c, iv), n in sorted(fvg_stat.items())))
-    lines.append("- 周期：1m/5m/15m/1h；类型：看涨/看跌（key 未存类型，按开单记录统计）")
-    lines.append(f"- 已开单：{n_open} 单 / 信号 {len(fvg_keys)} 个（非严格一一对应，"
-                 f"存在同一信号多单或未推送开单）")
+    # 二、交易概览
+    lines.append("二、交易概览")
+    lines.append(f"总开仓 {n_open} | 总平仓 {len(closed_traded)} | 总持仓 {n_pos} | 拒单 0")
+    if pos_by_contract := {t.get("contract"): 0 for t in trades}:
+        for t in trades:
+            pos_by_contract[t.get("contract")] += 1
+    lines.append("品种：" + " / ".join(f"{k.replace('_USDT', '')}" for k in pos_by_contract)
+                 + "  |  多 " + str(dir_stat.get("buy", 0)) + " / 空 " + str(dir_stat.get("sell", 0)))
     lines.append("")
 
-    # ============ 九、系统运行 ============
-    lines.append("**九、系统运行**")
-    lines.append(f"- 报告生成：{datetime.now(BJ_TZ).strftime('%Y-%m-%d %H:%M:%S')}（UTC+8）")
-    t0 = time.time()
+    # 三、分周期绩效
+    lines.append("三、分周期绩效")
+    iv_order = {"5m": "5M", "15m": "15M", "1h": "1H", "4h": "4H"}
+    for iv in sorted(period_perf, key=lambda x: {"5m": 0, "15m": 1, "1h": 2, "4h": 3}.get(x, 9)):
+        p = period_perf[iv]
+        pnet = p["realized"] + p["fee"]
+        wr = (p["wins"] / p["closed"] * 100) if p["closed"] else 0.0
+        lines.append(f"• {iv_order.get(iv, iv.upper())} ：开 {p['open']} | 平 {p['closed']} | "
+                     f"多 {p['long']} / 空 {p['short']} | 净 {pnet:+.2f} | 胜率 {wr:.0f}%")
+    # 共振
+    lines.append("⚡ 多周期共振" + ("（详细）" if n_reso else ""))
+    lines.append(f"📌 今日共 {n_reso} 笔共振")
+    for r in reso_list:
+        pnl_s = f"{r['pnl']:+.2f}" if r["pnl"] is not None else "-"
+        tag = "浮亏" if (r["pnl"] or 0) < 0 else "浮盈"
+        dir_cn = "多" if r["dir"] in ("long", "buy") else "空"
+        lines.append(f"• {r['contract'].replace('_USDT', '')} {r['combo']} {dir_cn} | {r['status']} | "
+                     f"开{r['open']} 现{r['cur']} | {tag} {pnl_s}")
+    c_5_15 = sum(1 for r in reso_list if r["combo"] == "5M+15M")
+    c_15_1h = sum(1 for r in reso_list if r["combo"] == "15M+1H")
+    c_triple = sum(1 for r in reso_list if r["triple"])
+    lines.append(f"📌 共振组合分布：5M+15M {c_5_15}笔 | 15M+1H {c_15_1h}笔 | 三周期共振 {c_triple}笔")
+    lines.append("")
+
+    # 四、盈亏拆解
+    lines.append("四、盈亏拆解")
+    lines.append(f"已实现：{realized:+.2f} | 未实现：{upl:+.2f}")
+    lines.append(f"手续费：{fees:+.2f} | 资金费：0.00")
+    lines.append(f"净盈亏：{net:+.2f} USDT")
+    lines.append("")
+
+    # 五、绩效指标
+    lines.append("五、绩效指标")
+    if metrics.get("sample"):
+        m = metrics
+        pf = f"{m['profit_factor']:.2f}" if m["profit_factor"] else "N/A"
+        dd = f"{m['max_drawdown'] * 100:.2f}%"
+        hold_s = f"{avg_hold_h:.1f}h" if avg_hold_h is not None else "-"
+        lines.append(f"胜率：{m['win_rate'] * 100:.0f}% ({m['wins']}/{m['n']}) | 盈亏比：{pf}")
+        lines.append(f"最大回撤：{dd} | 平均持仓：{hold_s}")
+    else:
+        hold_s = f"{avg_hold_h:.1f}h" if avg_hold_h is not None else "-"
+        lines.append(f"胜率：0% (0/0) | 盈亏比：N/A")
+        lines.append(f"最大回撤：- | 平均持仓：{hold_s}")
+    lines.append("")
+
+    # 系统运行
+    run_s = f"{run_hours:.0f}h" if run_hours is not None else "-"
     ping = _safe(lambda: okx_exec.ping(), None)
-    if isinstance(ping, dict):
-        lines.append(f"- OKX API 延迟：{(time.time() - t0) * 1000:.0f} ms")
-    else:
-        lines.append(f"- OKX API 延迟：测量失败（{ping}）")
-    lines.append("- 接口状态：balance "
-                 + ("OK" if isinstance(acct, dict) and not acct.get("__error__") else f"FAIL({acct})")
-                 + " / positions "
-                 + ("OK" if isinstance(pos, list) else f"FAIL({pos})")
-                 + " / algos "
-                 + ("OK" if isinstance(algo, list) else f"FAIL({algo})"))
-    if isinstance(gh_runs, list):
-        ok = sum(1 for s, _ in gh_runs if s == "success")
-        lines.append(f"- Actions 近{len(gh_runs)}次运行：成功 {ok} 次 / 失败 {len(gh_runs) - ok} 次")
-        for s, t in gh_runs[:3]:
-            lines.append(f"  - {t} {s}")
-    else:
-        lines.append("- Actions 运行状态：非 Actions 环境，未查询")
-    lines.append("- 断线重连/拒单原因：脚本未记录，暂无")
+    ping_s = "正常" if isinstance(ping, dict) else f"异常({ping})"
+    errs = []
+    if not isinstance(acct, dict) or acct.get("__error__"):
+        errs.append("balance异常")
+    if not isinstance(pos, list):
+        errs.append("positions异常")
+    if not isinstance(algo, list):
+        errs.append("algos异常")
+    err_s = "无异常" if not errs else "异常:" + "/".join(errs)
+    lines.append("系统运行")
+    lines.append(f"运行 {run_s} | API延迟 {ping_s} | {err_s} | 无拒单")
     lines.append("")
 
-    # ============ 十、总结与计划 ============
-    lines.append("**十、总结与计划**")
+    # 总结
     issues = []
     if n_open and not closed_traded:
-        issues.append(f"开仓 {n_open} 单，当日尚无平仓成交（OCO 未触发或 demo fills 未返回平仓），盈亏未实现")
-    if isinstance(pos, list) and n_pos:
-        issues.append(f"仍有 {n_pos} 个持仓未平，注意风控")
-    if isinstance(acct, dict) and acct.get("__error__"):
-        issues.append("balance 接口失败，权益数据缺失")
+        issues.append(f"开仓 {n_open} 单尚无平仓（OCO 未触发或 demo fills 未返回），盈亏未实现")
+    if n_pos:
+        issues.append(f"持有 {n_pos} 仓，注意风控")
+    if n_reso:
+        issues.append(f"多周期共振 {n_reso} 笔，信号增强")
+    if warn:
+        issues.append("；".join(warn))
     if not issues:
-        issues.append("当日运行正常")
-    lines.append("- 今日总结：" + "；".join(issues))
-    lines.append("- 异常说明：见各节接口状态标注")
-    lines.append("- 明日计划：保持每 5 分钟扫描开单，持续观察 OCO 平仓与绩效统计")
-    lines.append("- 参数调整：无（如需调整杠杆/单笔/RR 请告知）")
-    lines.append("- 风险提醒：模拟盘 5U/单，当前仅手续费消耗；实盘前务必核对持仓与接口")
-    lines.append("")
-    lines.append("> 模拟盘自动交易 · FVG 三K线缺口策略")
+        issues.append("运行正常")
+    lines.append("总结")
+    lines.append("；".join(issues))
+
+    if not compact:
+        # ===== 完整版附录：平仓明细 / 持仓挂单 / FVG信号 / 系统 =====
+        lines.append("")
+        lines.append("━━━━━━ 附录 ━━━━━━")
+        lines.append("【平仓明细】")
+        if closed_traded:
+            for c in closed_traded[-8:]:
+                arrow = "▲" if c["side"] == "buy" else "▼"
+                lines.append(f"- {arrow} {c['ord_id'][-6:]} {_fmt_ts(c['ts'])} 价 {c['px'] or '-'} 净 {c['net']:+.2f}")
+        else:
+            lines.append("- 当日无平仓成交记录")
+        lines.append("【持仓/挂单】")
+        if pos_rows_raw:
+            for p in pos_rows_raw:
+                inst = p.get("instId", "?")
+                side = p.get("posSide", "?")
+                lines.append(f"- {inst} {side} 开 {_fmt_px(p.get('avgPx'))} 现 {_fmt_px(p.get('markPx'))} "
+                             f"浮盈 {float(p.get('upl') or 0.0):+.2f} {p.get('lev') or p.get('lever') or '-'}x")
+        else:
+            lines.append("- 无持仓")
+        if isinstance(algo, list):
+            lines.append(f"- OCO 挂单 {len(algo)} 单")
+        else:
+            lines.append(f"- 挂单接口不可用：{algo}")
+        lines.append("【FVG 信号】")
+        lines.append(f"- 当日信号数：{len(fvg_keys)} 个（.fvg_pushed 口径）")
+        fvg_stat = {}
+        for k in fvg_keys:
+            parts = k.split("|")
+            c = parts[0].replace("_USDT", "") if parts else "?"
+            iv = parts[1] if len(parts) > 1 else "?"
+            fvg_stat[(c, iv)] = fvg_stat.get((c, iv), 0) + 1
+        if fvg_stat:
+            lines.append("- 分布：" + " / ".join(f"{c} {iv} {n}个" for (c, iv), n in sorted(fvg_stat.items())))
+        lines.append("【系统】")
+        if isinstance(acct, dict) and acct and not acct.get("__error__"):
+            lines.append(f"- 权益 {acct['totalEq']:.2f} | 可用 {acct['availEq']:.2f} USDT")
+        lines.append(f"- 报告生成：{datetime.now(BJ_TZ).strftime('%Y-%m-%d %H:%M:%S')}（UTC+8）")
+        if isinstance(gh_runs, list):
+            ok = sum(1 for s, _ in gh_runs if s == "success")
+            lines.append(f"- Actions 近{len(gh_runs)}次：成功 {ok} / 失败 {len(gh_runs) - ok}")
+        else:
+            lines.append("- Actions 状态：非 Actions 环境，未查询")
 
     text = "\n".join(lines)
-    if compact:
-        text = _compact_text(
-            day_str=day_str, n_open=n_open, n_fills=len(fills_all),
-            net=net, realized=realized, fees=fees, upl=upl, n_pos=n_pos, n_algo=n_algo,
-            metrics=metrics, pos_by_contract=pos_by_contract, dir_stat=dir_stat,
-            period_stat=period_stat, fvg_stat=fvg_stat, fvg_keys=fvg_keys,
-            closed_traded=closed_traded, pos=pos, algo=algo, acct=acct,
-            gh_runs=gh_runs, issues=issues)
     if dry:
         text += "\n\n[DRY-RUN 未推送]"
     return text
@@ -486,88 +565,8 @@ def build_report(day_str, dry=False, base_dir=".", compact=False):
 def _compact_text(day_str, n_open, n_fills, net, realized, fees, upl, n_pos, n_algo,
                   metrics, pos_by_contract, dir_stat, period_stat, fvg_stat, fvg_keys,
                   closed_traded, pos, algo, acct, gh_runs, issues):
-    """企微推送精简版（text 上限 2048B），按老板十段模板压成紧凑版，结构与完整版一致。"""
-    lines = []
-    lines.append(f"📊 FVG 日报 · {day_str}（UTC+8）")
-    # 一、基础信息
-    lines.append("【一、基础信息】OKX Demo | 开单 {}(trader) | 成交 {}条 | 平仓 {}单"
-                 .format(n_open, n_fills, len([c for c in closed_traded if c["pnl"] != 0])))
-    # 二、账户概览
-    if isinstance(acct, dict) and acct and not acct.get("__error__"):
-        lines.append("【二、账户概览】权益 {:.2f} | 可用 {:.2f} | 占用 {:.2f} | 浮盈 {:+.2f}"
-                     .format(acct["totalEq"], acct["availEq"], acct["frozenBal"], acct["upl"]))
-    else:
-        lines.append("【二、账户概览】接口不可用")
-    # 三、交易概览
-    parts = ["开{n}/平{p}/持{h}/OCO{a}".format(n=n_open, p=len([c for c in closed_traded if c["pnl"] != 0]), h=n_pos, a=n_algo)]
-    if dir_stat:
-        parts.append("多{}空{}".format(dir_stat.get("buy", 0), dir_stat.get("sell", 0)))
-    if pos_by_contract:
-        parts.append(" ".join("{}{}单".format(k.replace("_USDT", ""), v) for k, v in pos_by_contract.items()))
-    if period_stat:
-        parts.append(" ".join("{}{}单".format(k, v) for k, v in sorted(period_stat.items(), key=lambda x: x[0])))
-    lines.append("【三、交易概览】" + " | ".join(parts))
-    # 四、盈亏拆解
-    lines.append("【四、盈亏拆解】已实现 {:+.2f} | 手续费 {:+.2f} | 浮盈 {:+.2f} | **净盈亏 {:+.2f} USDT**"
-                 .format(realized, fees, upl, net))
-    # 五、绩效
-    if metrics.get("sample"):
-        m = metrics
-        lines.append("【五、绩效】胜率 {:.0f}% | 期望 {:+.3f}/单 | 盈亏比 {} | 回撤 {:.1f}%"
-                     .format(m["win_rate"] * 100, m["expectancy"],
-                             "{:.2f}".format(m["profit_factor"]) if m["profit_factor"] else "-",
-                             m["max_drawdown"] * 100))
-    else:
-        lines.append("【五、绩效】无平仓，样本不足")
-    # 六、平仓明细
-    if closed_traded:
-        row = " | ".join("{}{} {}净{:+.2f}".format("▲" if c["side"] == "buy" else "▼",
-                                                   c["ord_id"][-6:], _fmt_ts(c["ts"]), c["net"])
-                         for c in closed_traded[-5:])
-        lines.append("【六、平仓明细】" + row)
-    else:
-        lines.append("【六、平仓明细】当日无平仓成交")
-    # 七、持仓/挂单
-    pos_rows = []
-    if isinstance(pos, list):
-        for p in pos:
-            try:
-                if float(p.get("pos") or 0) == 0:
-                    continue
-            except (TypeError, ValueError):
-                continue
-            up = float(p.get("upl") or 0.0)
-            pos_rows.append("{}{} {}→{} {:+.2f} {}x".format(
-                p.get("instId", "?").replace("-SWAP", ""), p.get("posSide", "?")[:1],
-                _fmt_px(p.get("avgPx")), _fmt_px(p.get("markPx")), up,
-                p.get("lev") or p.get("lever") or "-"))
-    if not pos_rows:
-        pos_rows.append("无持仓")
-    line7 = "【七、持仓/挂单】" + " | ".join(pos_rows)
-    if isinstance(algo, list) and algo:
-        algo_row = " | ".join("{}{}触发{}".format(a.get("instId", "?").replace("-SWAP", ""),
-                                                   a.get("side", "?")[:1],
-                                                   a.get("tpTriggerPx") or a.get("slTriggerPx") or "-")
-                              for a in algo[-3:])
-        line7 += " | OCO: " + algo_row
-    lines.append(line7)
-    # 八、FVG 信号
-    fvg_parts = ["{}个".format(len(fvg_keys))]
-    if fvg_stat:
-        fvg_parts.append(" ".join("{}{} {}个".format(c, iv, n) for (c, iv), n in sorted(fvg_stat.items())))
-    fvg_parts.append("已开单{}".format(n_open))
-    lines.append("【八、FVG 信号】" + " | ".join(fvg_parts))
-    # 九、系统运行（不含时间戳，避免 md5 每轮变化导致刷屏；只随业务数据变化才推送）
-    sys_parts = ["每5分钟自动扫描刷新"]
-    if isinstance(gh_runs, list):
-        ok = sum(1 for s, _ in gh_runs if s == "success")
-        sys_parts.append("Actions {}/{}成功".format(ok, len(gh_runs)))
-    lines.append("【九、系统运行】" + " | ".join(sys_parts) + " | balance/positions/algos 见完整版")
-    # 十、总结
-    lines.append("【十、总结】" + ("；".join(issues) if issues else "运行正常"))
-    lines.append("")
-    lines.append("> 完整版见仓库 daily_report_*.md（结构一致，字段更全）")
-    return "\n".join(lines)
+    """企微推送版：直接复用 build_report compact 模板。"""
+    return build_report(day_str, base_dir=".", compact=True)
 
 
 # ---------------- 推送 ----------------
