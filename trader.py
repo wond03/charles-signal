@@ -143,11 +143,30 @@ def open_position(contract, fvg, base_dir, dry_run=False):
         return {"ok": False, "reason": str(e)}
     print(f"[trade] 开仓成功 ordId={order.get('ordId')} qty={order.get('qty')}")
 
-    # 挂 OCO 止盈止损
+    # 挂 OCO 止盈止损：先撤旧挂新，同一合约+方向只保留一组 OCO，避免 App 堆积大量止盈止损
+    try:
+        pend = okx_exec.get_algo_orders(inst=contract, ord_type="oco")
+        for a in pend:
+            if a.get("instId") == inst_okx and a.get("posSide") == direction:
+                okx_exec.cancel_algo(contract, a.get("algoId"))
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 撤销旧OCO失败(继续): {e}")
+
+    # OCO 张数用当前该方向实际总持仓，确保覆盖合并后的全部仓位
+    oco_qty = order.get("qty", 0)
+    try:
+        poss = okx_exec.get_positions(contract)
+        for p in poss:
+            if p.get("posSide") == direction and abs(float(p.get("pos", 0) or 0)) > 0:
+                oco_qty = abs(float(p.get("pos", 0)))
+                break
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] 查询持仓张数失败(用本次开仓张数): {e}")
+
     algo = {}
     try:
-        algo = okx_exec.place_algo_sltp(contract, direction, order.get("qty", 0), sl, tp)
-        print(f"[trade] OCO止盈止损挂单成功 algoId={algo.get('algoId')}")
+        algo = okx_exec.place_algo_sltp(contract, direction, oco_qty, sl, tp)
+        print(f"[trade] OCO止盈止损挂单成功 algoId={algo.get('algoId')} qty={oco_qty}")
     except Exception as e:  # noqa: BLE001
         print(f"[warn] 挂止盈止损失败(持仓已开,注意手动处理): {e}")
 
@@ -242,3 +261,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
