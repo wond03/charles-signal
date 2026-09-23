@@ -886,5 +886,17 @@
     "inst": "BTC-USDT-SWAP",
     "side": "sell",
     "posSide": "short"
+  },
+  "4455840649": {
+    "ts": "1790154304136",
+    "inst": "BTC-USDT-SWAP",
+    "side": "buy",
+    "posSide": "short"
+  },
+  "4455844006": {
+    "ts": "1790154739192",
+    "inst": "BTC-USDT-SWAP",
+    "side": "buy",
+    "posSide": "long"
   }
 }
