@@ -2,8 +2,7 @@ name: FVG Scan & Auto Trade
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # 每5分钟一次，5M 周期滞后 <= 1根K线（扫描+开单）
-    - cron: '10 16 * * *'   # 每日统计：UTC 16:10 = 北京次日 00:10（统计自然日）
+    - cron: '*/5 * * * *'   # 每5分钟一次：扫描开单 + 实时刷新日报文件
   workflow_dispatch:        # 支持手动触发
 
 permissions:
@@ -77,82 +76,6 @@ jobs:
             echo "no state change, skip commit"
           else
             git commit -m "chore: update fvg/trade state & realtime report [skip ci]"
-            git pull --rebase --autostash || true
-            git push
-          fi
-
-  daily-report:
-    runs-on: ubuntu-latest
-    needs: [scan-trade]
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.event.schedule == '10 16 * * *')
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install deps
-        run: pip install requests
-
-      - name: Debug OKX orders endpoints
-        env:
-          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-          OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
-          OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
-        run: |
-          python3 - <<'PY'
-          import json, requests, time, base64, hashlib, hmac, os
-          KEY = os.environ["OKX_API_KEY"]; SEC = os.environ["OKX_API_SECRET"]; PAS = os.environ["OKX_API_PASSPHRASE"]
-          ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
-          def req(path, params=None):
-              qs = ("?" + requests.compat.urlencode(params)) if params else ""
-              full = path + qs
-              msg = ts + "GET" + full
-              sign = base64.b64encode(hmac.new(SEC.encode(), msg.encode(), hashlib.sha256).digest()).decode()
-              h = {"OK-ACCESS-KEY": KEY, "OK-ACCESS-SIGN": sign, "OK-ACCESS-TIMESTAMP": ts,
-                   "OK-ACCESS-PASSPHRASE": PAS, "Content-Type": "application/json", "x-simulated-trading": "1"}
-              r = requests.get("https://www.okx.com" + full, headers=h, timeout=20)
-              try:
-                  j = r.json(); print(path, params, "->", r.status_code, (j.get("code"), j.get("msg")), "n=", len(j.get("data", [])))
-              except Exception:
-                  print(path, params, "->", r.status_code, r.text[:150])
-          req("/api/v5/trade/orders-history", {"instId": "BTC-USDT-SWAP"})
-          req("/api/v5/trade/orders-history", {"instId": "BTC-USDT-SWAP", "ordType": "market"})
-          req("/api/v5/trade/orders-history", {"instId": "BTC-USDT-SWAP", "state": "filled"})
-          req("/api/v5/trade/orders-history", {"instId": "BTC-USDT-SWAP", "after": "", "before": "", "limit": "20"})
-          req("/api/v5/trade/fills-history", {"instId": "BTC-USDT-SWAP"})
-          req("/api/v5/trade/fills", {"instId": "BTC-USDT-SWAP"})
-          req("/api/v5/trade/orders-algo-history", {"instId": "BTC-USDT-SWAP", "ordType": "oco"})
-          req("/api/v5/account/positions", {"instId": "BTC-USDT-SWAP"})
-          PY
-
-      - name: Build & send daily report to personal (wecom-cli)
-        env:
-          WECOM_ENC_KEY: ${{ secrets.WECOM_ENC_KEY }}
-          WECOM_CREDENTIALS: ${{ secrets.WECOM_CREDENTIALS }}
-          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-          OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
-          OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
-        run: |
-          # 统计北京时间昨日自然日，日报直发老板个人（wecom-cli），同时落盘供回溯
-          npm install -g @wecom/cli@1.3.2
-          export PATH="$(npm prefix -g)/bin:$PATH"
-          mkdir -p "$HOME/.config/wecom"
-          echo "$WECOM_ENC_KEY" | base64 -d > "$HOME/.config/wecom/.encryption_key"
-          echo "$WECOM_CREDENTIALS" | base64 -d > "$HOME/.config/wecom/credentials.enc"
-          chmod 600 "$HOME/.config/wecom/.encryption_key" "$HOME/.config/wecom/credentials.enc"
-          python3 daily_report.py --date "$(TZ=Asia/Shanghai date -d 'yesterday' +%Y-%m-%d)" --push-cli --save-dir . || true
-
-      - name: Persist daily report
-        run: |
-          git config user.name "marvis-bot"
-          git config user.email "marvis-bot@users.noreply.github.com"
-          git add daily_report_*.md
-          if git diff --cached --quiet; then
-            echo "no report, skip commit"
-          else
-            git commit -m "chore: daily report [skip ci]"
             git pull --rebase --autostash || true
             git push
           fi
