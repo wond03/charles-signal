@@ -68,6 +68,7 @@ jobs:
             echo "no state change, skip commit"
           else
             git commit -m "chore: update fvg/trade state [skip ci]"
+            git pull --rebase --autostash || true
             git push
           fi
 
@@ -104,5 +105,6 @@ jobs:
             echo "no report, skip commit"
           else
             git commit -m "chore: daily report [skip ci]"
+            git pull --rebase --autostash || true
             git push
           fi
