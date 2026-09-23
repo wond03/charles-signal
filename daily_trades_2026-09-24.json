@@ -1,0 +1,36 @@
+[
+  {
+    "time": "2026-09-24 01:45",
+    "ts": null,
+    "contract": "BTC_USDT",
+    "interval": "15m",
+    "type": "bullish",
+    "side": "buy",
+    "direction": "long",
+    "entry_ref": 84368.3,
+    "sl": 84115.1951,
+    "tp": 84874.5098,
+    "size_usdt": 5.0,
+    "leverage": 100,
+    "ord_id": "3949153574735740928",
+    "qty": 0.6,
+    "algo_id": "3949153586759712768"
+  },
+  {
+    "time": "2026-09-24 01:45",
+    "ts": null,
+    "contract": "XAU_USDT",
+    "interval": "15m",
+    "type": "bullish",
+    "side": "buy",
+    "direction": "long",
+    "entry_ref": 4290.5,
+    "sl": 4277.6285,
+    "tp": 4316.243,
+    "size_usdt": 5.0,
+    "leverage": 50,
+    "ord_id": "3949153831259373568",
+    "qty": 59.0,
+    "algo_id": "3949153842746474496"
+  }
+]
