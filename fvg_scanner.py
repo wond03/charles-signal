@@ -252,6 +252,23 @@ def signal_id(contract, f):
     return f"FVG-{sym}-{t}"
 
 
+def estimate_liq(entry_price, f_type, lev):
+    """强平价粗算：以 1/杠杆 保证金率全额为安全垫（未扣维持保证金/手续费）。"""
+    if f_type == "bullish":
+        return round(entry_price * (1 - 1.0 / lev), 4)
+    return round(entry_price * (1 + 1.0 / lev), 4)
+
+
+def estimate_net_pnl(entry_price, tp, f_type, notional, fee_bps=10):
+    """止盈时预估净盈亏 = 毛利 - 双边手续费（默认 taker 双边 0.1%，估算值）。"""
+    if f_type == "bullish":
+        gross = (tp - entry_price) / entry_price * notional
+    else:
+        gross = (entry_price - tp) / entry_price * notional
+    fee = notional * fee_bps / 10000
+    return gross - fee, fee
+
+
 def open_tpl_block(contract, f, entry_price):
     """开仓模板 markdown 区块（杠杆/单笔/SL/TP/仓位，与 trader.py 参数一致）。"""
     lev = LEVERAGE.get(contract, 100)
@@ -259,13 +276,19 @@ def open_tpl_block(contract, f, entry_price):
     side = "多" if f["type"] == "bullish" else "空"
     notional = TRADE_SIZE_USDT * lev
     qty_est = notional / entry_price if entry_price else 0.0
+    liq = estimate_liq(entry_price, f["type"], lev)
+    net, fee = estimate_net_pnl(entry_price, tp, f["type"], notional)
     return (
         "\n────────────\n"
         f"**开仓模板**：{contract} · {side} {lev}x · 单笔 {TRADE_SIZE_USDT:.0f}U 保证金\n"
+        f"**触发方式**：市价（推送即开单）\n"
+        f"**收盘确认**：是（K线收盘后扫描）\n"
         f"**入场参考**：<font color=\"comment\">{entry_price:.4f}</font>（最新价）\n"
         f"**止损**：<font color=\"warning\">{sl}</font>（缺口边界，无缓冲）\n"
         f"**止盈**：<font color=\"info\">{tp}</font>（RR 1:{RR:.0f}）\n"
+        f"**强平价**：≈{liq}（1/杠杆粗算，未扣维持保证金/手续费）\n"
         f"**名义价值**：≈{notional:.0f}U · 数量 ≈{qty_est:.6f}\n"
+        f"**预估净盈亏（止盈）**：≈{net:+.2f}U（毛利减双边手续费≈{fee:.2f}U，按 taker 双边0.1%估）\n"
         f"**风险提示**：{lev}x 杠杆风险极高，滑点与手续费可能显著影响小止损单"
     )
 
@@ -281,7 +304,9 @@ def send_single(webhook, contract, interval, f, entry_price):
         f"**方向**：<font color=\"{color}\">{arrow}</font>\n"
         f"**区间**：`{f['bottom']} ~ {f['top']}`\n"
         f"**信号 ID**：{signal_id(contract, f)}\n"
-        f"**状态**：待自动开单（已推送）"
+        f"**状态**：已触发（推送后自动开单）\n"
+        f"**有效期**：即时开单（本周期收盘前信号有效）\n"
+        f"**FVG 回补**：未检测（回补检测未上线）"
         + open_tpl_block(contract, f, entry_price)
     )
     payload = {"msgtype": "markdown", "markdown": {"content": content}}
@@ -295,7 +320,9 @@ def send_resonance(webhook, contract, time_str, items, entry_price):
     lines = [f"# ⚡ FVG 共振 · {contract}", "",
              f"**时间**：<font color=\"comment\">{time_str}（UTC+8）</font>",
              f"**信号 ID**：{signal_id(contract, items[0][1])}",
-             f"**状态**：待自动开单（已推送）", ""]
+             f"**状态**：已触发（推送后自动开单）",
+             f"**有效期**：即时开单（本周期收盘前信号有效）",
+             f"**FVG 回补**：未检测（回补检测未上线）", ""]
     for interval, f in items:
         arrow = "▲ 看涨" if f["type"] == "bullish" else "▼ 看跌"
         color = _color_for(f)
