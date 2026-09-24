@@ -272,35 +272,40 @@ def _aggregate_closed_from_bills(bills, trades):
     """基于 bills(type=2 平仓) 聚合为订单级记录（真实 pnl/fee）。
     平仓单 ordId 与开仓单不同：按 instId+方向+时间最近匹配回开仓单，
     补齐 interval/direction 供分周期×方向统计。匹配失败的保留为平仓记录。"""
-    # 开仓单按合约+方向分组，各维护按时间排序的待匹配队列
+    # 开仓单按合约+方向分组，各维护按时间排序的待匹配队列（含剩余可匹配数量）
     trade_queues = {}
     for t in trades:
         if not t.get("ord_id"):
             continue
         key = (t.get("contract"), t.get("direction") or t.get("side"))
-        trade_queues.setdefault(key, []).append(t)
+        try:
+            qty = float(t.get("qty") or 0.0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        trade_queues.setdefault(key, []).append([t, qty])  # [trade, remaining_qty]
     for q in trade_queues.values():
-        q.sort(key=lambda x: x.get("time") or "")
-    used = set()
+        q.sort(key=lambda x: x[0].get("time") or "")
     inst_contract = {v: k for k, v in _INST_OKX.items()}
     closed = []
     for b in bills:
         inst = b.get("instId", "")
         contract = inst_contract.get(inst, inst)
         sub = str(b.get("subType") or "")
-        # subType: 201/202 平多(long)  204/205 平空(short)
-        if sub in ("204", "205"):
-            direction = "short"
-        else:
-            direction = "long"
+        # subType 平空：204/205(正常平空/部分) 207/209(空强平/ADL)；其余平多类归 long
+        direction = "short" if sub in ("204", "205", "207", "209") else "long"
         try:
             ts = int(b.get("ts") or 0)
         except (TypeError, ValueError):
             ts = 0
-        # FIFO 匹配：同合约同方向中最早开仓（且已到平仓时间）的未用开仓单
+        try:
+            sz = float(b.get("sz") or 0.0)
+        except (TypeError, ValueError):
+            sz = 0.0
+        # FIFO 匹配：同合约同方向中最早开仓（且已到平仓时间）的未消耗完开仓单
         matched = None
-        for t in trade_queues.get((contract, direction), []):
-            if t.get("ord_id") in used:
+        for item in trade_queues.get((contract, direction), []):
+            t, remaining = item
+            if remaining <= 0:
                 continue
             try:
                 open_dt = datetime.strptime(t["time"], "%Y-%m-%d %H:%M").replace(tzinfo=BJ_TZ)
@@ -308,21 +313,25 @@ def _aggregate_closed_from_bills(bills, trades):
             except (ValueError, KeyError, TypeError):
                 continue
             if open_ms <= ts:
-                matched = t
+                matched = item
                 break
         side = "sell" if direction == "short" else "buy"
         pnl = float(b.get("pnl") or 0.0)
         fee = float(b.get("fee") or 0.0)
         rec = {"ord_id": b.get("ordId") or "?",
                "side": side, "direction": direction,
-               "interval": (matched or {}).get("interval") or "?",
+               "interval": (matched[0] if matched else {}).get("interval") or "?",
                "contract": contract,
                "px": b.get("px"), "ts": b.get("ts"),
                "pnl": pnl, "fee": fee, "net": pnl + fee}
         if matched:
-            used.add(matched["ord_id"])
-            rec["ord_id"] = matched["ord_id"]
-            rec["open_time"] = matched.get("time")
+            # 按平仓数量消耗开仓单剩余量；无 sz 时退化为一次性消耗
+            if sz > 0:
+                matched[1] -= sz
+            else:
+                matched[1] = 0.0
+            rec["ord_id"] = matched[0]["ord_id"]
+            rec["open_time"] = matched[0].get("time")
         closed.append(rec)
     closed.sort(key=lambda x: int(x.get("ts") or 0))
     return closed
@@ -402,6 +411,9 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
     else:
         trades = load_daily_trades(day_str, base_dir)
         fvg_keys = load_fvg_pushed(day_str, base_dir)
+    # 匹配池扩展：bills 平仓窗口内可能平掉窗口更早开仓的单子（如 24H 滚动窗口外的老仓），
+    # 匹配池向前扩 3 天，避免老仓平仓记录落入 interval="?" 导致分周期/共振统计失真。
+    trades_pool = load_daily_trades_window(start_bj - timedelta(days=3), end_bj, base_dir)
     fills_all = []
     bills_all = []
     for contract in _INST_OKX:
@@ -424,7 +436,7 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
     # ---- 基础计算 ----
     open_oids = {t.get("ord_id") for t in trades if t.get("ord_id")}
     n_open = len(open_oids)
-    closed = _aggregate_closed_from_bills(bills_all, trades)
+    closed = _aggregate_closed_from_bills(bills_all, trades_pool)
     closed_traded = [c for c in closed if c["pnl"] != 0]
     realized = sum(c["pnl"] for c in closed)
     fees = sum(float(o.get("fee") or 0.0) for o in fills_all)
