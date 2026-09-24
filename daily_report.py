@@ -729,8 +729,6 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False,
                     lines.append(line)
                 else:
                     lines.append(f"{iv_order.get(iv, iv.upper())}·{contract.replace('_USDT', '')} —")
-        if manual_n:
-            lines.append(f"备注：手动平仓 {manual_n} 笔（盈亏 {manual_pnl:+.2f}U）已剔除，不计入上表")
         lines.append("")
 
         # 多周期共振（组合×品种，模板口径）
@@ -799,6 +797,8 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False,
         lines.append(f"净盈亏：{net:+.2f} USDT")
         if manual_n:
             lines.append(f"备注：手动平仓 {manual_n} 笔（盈亏 {manual_pnl:+.2f}U）仅备注，不计入绩效统计")
+        lines.append("")
+        lines.append(f"报告生成：{datetime.now(BJ_TZ).strftime('%Y-%m-%d %H:%M:%S')}（UTC+8）")
         return "\n".join(lines)
 
     lines = []
@@ -824,8 +824,6 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False,
     # 二、交易概览
     lines.append("二、交易概览")
     lines.append(f"总开仓 {n_open} | 总平仓 {len(closed_stat)} | 总持仓 {n_pos} | 拒单 0")
-    if manual_n:
-        lines.append(f"（手动平仓 {manual_n} 笔另计，盈亏 {manual_pnl:+.2f}U，仅备注）")
     if pos_by_contract := {t.get("contract"): 0 for t in trades}:
         for t in trades:
             pos_by_contract[t.get("contract")] += 1
@@ -856,8 +854,6 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False,
                 lines.append(f"| {iv_order.get(iv, iv.upper())} | {ct} | {n} | {p['tp']}/{p['sl']}/{p['liq']} | {p['pnl']:+.2f}U | {wr:.2f}% |")
     else:
         lines.append("暂无平仓统计")
-    if manual_n:
-        lines.append(f"备注：手动平仓 {manual_n} 笔（盈亏 {manual_pnl:+.2f}U）已剔除，不计入上表")
     lines.append("")
 
     # 多周期共振（组合×品种，模板口径）
@@ -955,10 +951,6 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False,
         issues.append("运行正常")
     lines.append("总结")
     lines.append("；".join(issues))
-
-    if compact:
-        lines.append("")
-        lines.append(f"报告生成：{datetime.now(BJ_TZ).strftime('%Y-%m-%d %H:%M:%S')}（UTC+8）")
 
     if not compact:
         # ===== 完整版附录：平仓明细 / 持仓挂单 / FVG信号 / 系统 =====
