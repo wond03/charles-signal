@@ -112,7 +112,11 @@ jobs:
             echo "no state change, skip commit"
           else
             git commit -m "chore: update fvg/trade state & realtime report [skip ci]"
-            git pull --rebase --autostash || true
+            if ! git pull --rebase --autostash; then
+              echo "::error::git pull --rebase 失败（状态文件 rebase 冲突/网络异常），已 abort 并退出暴露根因"
+              git rebase --abort 2>/dev/null || true
+              exit 1
+            fi
             if git push; then
               echo "state pushed"
             else
