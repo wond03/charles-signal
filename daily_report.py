@@ -291,8 +291,18 @@ def _aggregate_closed_from_bills(bills, trades):
         inst = b.get("instId", "")
         contract = inst_contract.get(inst, inst)
         sub = str(b.get("subType") or "")
-        # subType 平空：204/205(正常平空/部分) 207/209(空强平/ADL)；其余平多类归 long
-        direction = "short" if sub in ("204", "205", "207", "209") else "long"
+        # subType 语义（OKX demo 实测，type=2 含开平仓）：
+        #   3=开多 4=开空 5=平多 6=平空；200+ 为强平/减仓（方向看 side）
+        # 3/4 是开仓记录（pnl=0），不算平仓，直接跳过
+        if sub in ("3", "4"):
+            continue
+        if sub == "5":
+            direction = "long"
+        elif sub == "6":
+            direction = "short"
+        else:
+            # 强平/减仓等异常子类型：买入=平空(short)，卖出=平多(long)
+            direction = "short" if str(b.get("side") or "").lower() == "buy" else "long"
         try:
             ts = int(b.get("ts") or 0)
         except (TypeError, ValueError):
@@ -439,7 +449,8 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
     closed = _aggregate_closed_from_bills(bills_all, trades_pool)
     closed_traded = [c for c in closed if c["pnl"] != 0]
     realized = sum(c["pnl"] for c in closed)
-    fees = sum(float(o.get("fee") or 0.0) for o in fills_all)
+    # 手续费统一取 bills（含开平仓全部成交，与 realized 同源，避免 fills 分页不全）
+    fees = sum(float(o.get("fee") or 0.0) for o in bills_all)
     net = realized + fees
     upl = 0.0
     n_pos = 0
@@ -614,15 +625,19 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
             ret = (net + upl) / init_approx if init_approx else 0.0
             pf = metrics.get("profit_factor") if metrics.get("sample") else None
             pf_s = f"{pf:.2f}" if pf else "N/A"
-            lines.append(f"总盈亏 {net + upl:+.2f} | 总笔数 {n_open} | 收益率 {ret * 100:+.2f}% | 盈亏比 {pf_s}")
+            lines.append(f"总盈亏 {net + upl:+.2f} | 总开仓 {n_open} | 总平仓 {len(closed_traded)} | 收益率 {ret * 100:+.2f}% | 盈亏比 {pf_s}")
         else:
             lines.append(f"账户接口不可用：{acct if acct else 'balance 无返回'}")
         lines.append("")
 
-        # 分周期×方向绩效
+        # 分周期×方向绩效（盈亏为已实现 pnl，不含手续费，与盈亏拆解口径一致）
         lines.append("分周期绩效（多/空）")
-        iv_order = {"5m": "5M", "15m": "15M", "1h": "1H", "4h": "4H"}
-        for iv in ("5m", "15m", "1h"):
+        iv_order = {"5m": "5M", "15m": "15M", "1h": "1H", "4h": "4H", "?": "老仓"}
+        for iv in ("5m", "15m", "1h", "?"):
+            if iv == "?":
+                q = period_perf.get("?")
+                if not q or not q["dir"]:
+                    continue
             p = period_perf.get(iv, {"open": 0, "long": 0, "short": 0, "dir": {}})
             segs = []
             for d in ("long", "short"):
@@ -630,7 +645,7 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
                                       "realized": 0.0, "fee": 0.0})
                 losses = st["losses"]
                 wr = (st["wins"] / st["closed"] * 100) if st["closed"] else 0.0
-                pnet = st["realized"] + st["fee"]
+                pnet = st["realized"]
                 d_cn = "多" if d == "long" else "空"
                 segs.append(f"{d_cn}{st['closed']}笔 胜{st['wins']}/{losses} {pnet:+.2f}U {wr:.0f}%")
             lines.append(f"{iv_order[iv]} 开{p['open']} | " + " | ".join(segs))
@@ -723,11 +738,11 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
         for d in ("long", "short"):
             st = p["dir"].get(d, {"closed": 0, "wins": 0, "losses": 0,
                                   "realized": 0.0, "fee": 0.0})
-            pnet = st["realized"] + st["fee"]
+            pnet = st["realized"]
             wr = (st["wins"] / st["closed"] * 100) if st["closed"] else 0.0
             d_cn = "多" if d == "long" else "空"
             lines.append(f"   {d_cn}：平 {st['closed']} | 胜 {st['wins']} / 负 {st['losses']} | "
-                         f"胜率 {wr:.0f}% | 盈亏 {pnet:+.2f}")
+                         f"胜率 {wr:.0f}% | 盈亏(已实现) {pnet:+.2f}")
     # 共振
     lines.append("⚡ 多周期共振" + ("（详细）" if n_reso else ""))
     lines.append(f"📌 今日共 {n_reso} 笔共振")
@@ -737,9 +752,12 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
         dir_cn = "多" if r["dir"] in ("long", "buy") else "空"
         lines.append(f"• {r['contract'].replace('_USDT', '')} {r['combo']} {dir_cn} | {r['status']} | "
                      f"开{r['open']} 现{r['cur']} | {tag} {pnl_s}")
-    c_5_15 = sum(1 for r in reso_list if r["combo"] == "5M+15M")
-    c_15_1h = sum(1 for r in reso_list if r["combo"] == "15M+1H")
+    c_5_15 = sum(1 for r in reso_list if r["combo"] == "5M+15M") + reso_closed_stats.get("5M+15M", {}).get("n", 0)
+    c_15_1h = sum(1 for r in reso_list if r["combo"] == "15M+1H") + reso_closed_stats.get("15M+1H", {}).get("n", 0)
     c_triple = sum(1 for r in reso_list if r["triple"])
+    for combo, st in reso_closed_stats.items():
+        if len(combo.split("+")) >= 3:
+            c_triple += st["n"]
     lines.append(f"📌 共振组合分布：5M+15M {c_5_15}笔 | 15M+1H {c_15_1h}笔 | 三周期共振 {c_triple}笔")
     lines.append("")
 
