@@ -122,12 +122,15 @@ def main():
         tid = o.get("tradeId")
         if not tid or tid in state:
             continue
-        state[tid] = {"ts": o.get("ts"), "inst": o.get("instId"),
-                      "side": o.get("side"), "posSide": o.get("posSide")}
         if not first_run:
             new_items.append(o)
 
     if first_run:
+        for o in fills:
+            tid = o.get("tradeId")
+            if tid:
+                state[tid] = {"ts": o.get("ts"), "inst": o.get("instId"),
+                              "side": o.get("side"), "posSide": o.get("posSide")}
         save_pushed(base_dir, state)
         print(f"[info] 首次初始化基线 {len(state)} 笔，不推送")
         return
@@ -138,15 +141,20 @@ def main():
 
     sent = 0
     for o in new_items:
+        tid = o["tradeId"]
         text = format_fill(o)
-        print(f"[trade-push] {o['tradeId']}\n{text}")
+        print(f"[trade-push] {tid}\n{text}")
         if args.no_push:
             continue
         try:
             push_cli(text)
-            sent += 1
         except Exception as e:  # noqa: BLE001
-            print(f"[warn] 推送失败 {o['tradeId']}: {e}")
+            print(f"[warn] 推送失败 {tid}: {e}")
+            continue  # 不标记 state，下轮重试，避免成交永久丢失
+        # 推送成功后才标记，防止失败丢成交
+        state[tid] = {"ts": o.get("ts"), "inst": o.get("instId"),
+                      "side": o.get("side"), "posSide": o.get("posSide")}
+        sent += 1
 
     save_pushed(base_dir, state)
     print(f"[info] 新增 {len(new_items)} 笔，推送 {sent} 条")
