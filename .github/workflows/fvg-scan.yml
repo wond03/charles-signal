@@ -70,14 +70,6 @@ jobs:
             echo "trader.py 正常退出"
           fi
 
-      - name: Probe OKX bills (diag)
-        env:
-          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
-          OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
-          OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
-        run: |
-          python3 diag_bills_probe.py || true
-
       - name: Refresh realtime daily report & push to personal
         env:
           WECOM_ENC_KEY: ${{ secrets.WECOM_ENC_KEY }}
