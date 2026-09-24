@@ -49,15 +49,20 @@ def main():
 
     day_str = datetime.now(BJ_TZ).strftime("%Y-%m-%d")
 
+    # 0) 单次采集账户快照，完整版与推送版共用，消除双快照浮盈跳变
+    snapshot = daily_report.collect_snapshot()
+
     # 1) 完整版落盘（10 节骨架，随时打开即最新）
-    full = daily_report.build_report(day_str, base_dir=args.base_dir, compact=False, rolling=True)
+    full = daily_report.build_report(day_str, base_dir=args.base_dir, compact=False, rolling=True,
+                                     snapshot=snapshot)
     out_path = f"daily_report_{day_str}.md"
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(full)
     print(f"[realtime] {out_path} 已刷新（完整版）")
 
     # 2) 精简推送版 + md5 去重
-    push = daily_report.build_report(day_str, base_dir=args.base_dir, compact=True, rolling=True)
+    push = daily_report.build_report(day_str, base_dir=args.base_dir, compact=True, rolling=True,
+                                     snapshot=snapshot)
     if len(push.encode("utf-8")) > 2048:
         print(f"[realtime] 警告：推送版 {len(push.encode('utf-8'))}B 超企微上限，截断处理")
         push = push[:1000] + "\n...(截断)"

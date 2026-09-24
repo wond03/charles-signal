@@ -226,6 +226,13 @@ def fetch_algo_pending():
                                      params={"ordType": "oco"}).get("data", [])
 
 
+def collect_snapshot():
+    """单次采集账户快照 (acct, pos, algo)，供 build_report 复用，消除双快照浮盈跳变。"""
+    return (_safe(fetch_account_snapshot, None),
+            _safe(fetch_positions, None),
+            _safe(fetch_algo_pending, None))
+
+
 def fetch_github_runs():
     """最近 GitHub Actions 运行状态（仅 Actions 内 GITHUB_TOKEN 可用）。"""
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -462,9 +469,10 @@ def compute_metrics(closed):
 
 # ---------------- 日报生成 ----------------
 
-def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False):
+def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False, snapshot=None):
     """生成日报。compact=True 返回企微推送版（模板结构，<2048B）。
-    rolling=True 时按当前推送时刻往前推 24h 的滚动窗口统计；否则按 day_str 自然日。"""
+    rolling=True 时按当前推送时刻往前推 24h 的滚动窗口统计；否则按 day_str 自然日。
+    snapshot 为 (acct, pos, algo) 元组时复用外部采集的快照，避免多次调用拉取不一致。"""
     if rolling:
         start_bj, end_bj = rolling_window()
     else:
@@ -507,9 +515,12 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
             funding_ok = False
             warn.append(f"funding bills {contract} 查询失败")
     funding_text = f"{funding_total:+.2f}" if funding_ok else "查询失败"
-    acct = _safe(fetch_account_snapshot, None)
-    pos = _safe(fetch_positions, None)
-    algo = _safe(fetch_algo_pending, None)
+    if snapshot is not None:
+        acct, pos, algo = snapshot
+    else:
+        acct = _safe(fetch_account_snapshot, None)
+        pos = _safe(fetch_positions, None)
+        algo = _safe(fetch_algo_pending, None)
     gh_runs = _safe(fetch_github_runs, None)
 
     # ---- 基础计算 ----
@@ -681,7 +692,11 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
             ret = (net + upl) / init_approx if init_approx else 0.0
             pf = metrics.get("profit_factor") if metrics.get("sample") else None
             pf_s = f"{pf:.2f}" if pf else "N/A"
-            lines.append(f"总盈亏 {net + upl:+.2f} | 总开仓 {n_open} | 总平仓 {len(closed_stat)} | 收益率 {ret * 100:+.2f}% | 盈亏比 {pf_s}")
+            pct = ret * 100
+            pct_s = f"{pct:+.3f}" if abs(pct) >= 0.0005 else "+0.000"
+            manual_s = f"（手动 {manual_n} 笔另计）" if manual_n else ""
+            lines.append(f"总盈亏 {net + upl:+.2f} | 净盈亏(已实现) {net:+.2f} | 总开仓 {n_open} | "
+                         f"总平仓 {len(closed_stat)}{manual_s} | 收益率 {pct_s}% | 盈亏比 {pf_s}")
         else:
             lines.append(f"账户接口不可用：{acct if acct else 'balance 无返回'}")
         lines.append("")
@@ -798,7 +813,10 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
         pf = metrics.get("profit_factor") if metrics.get("sample") else None
         pf_s = f"{pf:.2f}" if pf else "N/A"
         dd_s = f"{metrics['max_drawdown'] * 100:.2f}%" if metrics.get("sample") else "-"
-        lines.append(f"总盈亏 {net + upl:+.2f} | 收益率 {ret * 100:+.2f}% | 盈亏比 {pf_s} | 最大回撤 {dd_s}")
+        pct = ret * 100
+        pct_s = f"{pct:+.3f}" if abs(pct) >= 0.0005 else "+0.000"
+        lines.append(f"总盈亏 {net + upl:+.2f}（含浮盈 {upl:+.2f}） | 净盈亏(已实现) {net:+.2f} | "
+                     f"收益率 {pct_s}% | 盈亏比 {pf_s} | 最大回撤 {dd_s}")
     else:
         lines.append(f"账户接口不可用：{acct if acct else 'balance 无返回'}")
     lines.append("")
@@ -938,13 +956,20 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
     lines.append("总结")
     lines.append("；".join(issues))
 
+    if compact:
+        lines.append("")
+        lines.append(f"报告生成：{datetime.now(BJ_TZ).strftime('%Y-%m-%d %H:%M:%S')}（UTC+8）")
+
     if not compact:
         # ===== 完整版附录：平仓明细 / 持仓挂单 / FVG信号 / 系统 =====
         lines.append("")
         lines.append("━━━━━━ 附录 ━━━━━━")
         lines.append("【平仓明细】")
         if closed_traded:
-            for c in closed_traded[-8:]:
+            shown = closed_traded[-8:]
+            if len(closed_traded) > len(shown):
+                lines.append(f"（共 {len(closed_traded)} 笔，仅展示最近 {len(shown)} 笔）")
+            for c in shown:
                 arrow = "▲" if c["side"] == "buy" else "▼"
                 tag = {"tp": "止盈", "sl": "止损", "liq": "强平", "manual": "手动"}.get(c.get("reason"), "")
                 tag_s = f" [{tag}]" if tag else ""
@@ -1041,8 +1066,11 @@ def main():
 
     day_str = args.date or datetime.now(BJ_TZ).strftime("%Y-%m-%d")
     rolling = args.date is None  # 未指定日期：按推送时刻往前推 24h 滚动窗口
-    full = build_report(day_str, base_dir=args.base_dir, compact=False, rolling=rolling)
-    push = build_report(day_str, base_dir=args.base_dir, compact=True, rolling=rolling)
+    snapshot = collect_snapshot()
+    full = build_report(day_str, base_dir=args.base_dir, compact=False, rolling=rolling,
+                        snapshot=snapshot)
+    push = build_report(day_str, base_dir=args.base_dir, compact=True, rolling=rolling,
+                        snapshot=snapshot)
 
     print(full)
 
