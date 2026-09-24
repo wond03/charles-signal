@@ -162,9 +162,11 @@ def fetch_fills(contract, begin_ms, end_ms):
     return out
 
 
-def fetch_bills(contract, begin_ms, end_ms, max_pages=3):
+def fetch_bills(contract, begin_ms, end_ms, max_pages=10):
     """拉 OKX 账单平仓记录（/api/v5/account/bills, type=2），返回升序列表。
-    真实已实现盈亏在 pnl 字段、手续费在 fee 字段；按 begin/end 窗口分页拉取。"""
+    真实已实现盈亏在 pnl 字段、手续费在 fee 字段；按 begin/end 窗口分页拉取。
+    同一订单多次成交会拆成多条 bill（ordId 相同），拉全后由
+    _aggregate_closed_from_bills 合并为订单级，避免平仓笔数虚高。"""
     inst_okx = _INST_OKX.get(contract, contract)
     out, after = [], ""
     for _ in range(max_pages):
@@ -187,6 +189,8 @@ def fetch_bills(contract, begin_ms, end_ms, max_pages=3):
         after = rows[-1].get("billId", "")
         if not after:
             break
+    if len(rows) >= 100 and after:
+        print(f"[warn] fetch_bills {contract}: 已达 {max_pages} 页分页上限，账单可能截断", flush=True)
     out.sort(key=lambda x: int(x.get("ts") or 0))
     return out
 
@@ -270,8 +274,37 @@ def _aggregate_closed(fills):
 
 def _aggregate_closed_from_bills(bills, trades):
     """基于 bills(type=2 平仓) 聚合为订单级记录（真实 pnl/fee）。
-    平仓单 ordId 与开仓单不同：按 instId+方向+时间最近匹配回开仓单，
-    补齐 interval/direction 供分周期×方向统计。匹配失败的保留为平仓记录。"""
+    同一订单多次成交会被拆成多条 bill（ordId 相同），先按 ordId 合并为一条订单记录，
+    再按 instId+方向+时间最近匹配回开仓单，补齐 interval/direction 供分周期×方向统计。
+    匹配失败的保留为平仓记录。"""
+    # ---- 同一订单多次成交合并（ordId 相同 → 一笔；pnl/fee/sz 求和，ts 取最早）----
+    merged = {}
+    order_seq = []
+    for b in bills:
+        oid = b.get("ordId")
+        if oid is None:
+            # 无 ordId 无法合并，按单条处理
+            merged.setdefault(("_raw", id(b)), dict(b))
+            order_seq.append(("_raw", id(b)))
+            continue
+        oid = str(oid)
+        if oid not in merged:
+            merged[oid] = dict(b)
+            order_seq.append(oid)
+        else:
+            m = merged[oid]
+            def _num(v):
+                try:
+                    return float(v or 0.0)
+                except (TypeError, ValueError):
+                    return 0.0
+            m["pnl"] = _num(m.get("pnl")) + _num(b.get("pnl"))
+            m["fee"] = _num(m.get("fee")) + _num(b.get("fee"))
+            m["sz"] = _num(m.get("sz")) + _num(b.get("sz"))
+            if _num(b.get("ts")) < _num(m.get("ts")):
+                m["ts"] = b.get("ts")
+            # subType / side / instId 同单一致，保留首条
+    bills = [merged[k] for k in order_seq]
     # 开仓单按合约+方向分组，各维护按时间排序的待匹配队列（含剩余可匹配数量）
     trade_queues = {}
     for t in trades:
@@ -666,15 +699,20 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
             pos_st = reso_pos_stat.get(combo, {"n": 0, "pnl": 0.0})
             cst = reso_closed_stats.get(combo, {"n": 0, "wins": 0, "losses": 0,
                                                 "realized": 0.0, "fee": 0.0})
-            total_n = cst["n"] + pos_st["n"]
-            wins = cst["wins"]
-            losses = cst["losses"]
-            pnl = cst["realized"] + cst["fee"] + pos_st["pnl"]
-            wr = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
-            if total_n == 0:
+            closed_n = cst["n"]
+            pos_n = pos_st["n"]
+            if closed_n == 0 and pos_n == 0:
                 lines.append(f"{combo} 0笔 | 胜负 -/- | 盈亏 - | 胜率 -")
+            elif closed_n == 0:
+                # 仅持仓中：浮盈不参与胜负/胜率，避免“0胜0负却有盈亏”的误读
+                lines.append(f"{combo} 持仓中 {pos_n}笔 | 浮盈 {pos_st['pnl']:+.2f} | 胜负 -/- | 胜率 -")
             else:
-                lines.append(f"{combo} {total_n}笔 | 胜负 {wins}/{losses} | 盈亏 {pnl:+.2f} | 胜率 {wr:.0f}%")
+                wins = cst["wins"]
+                losses = cst["losses"]
+                pnl = cst["realized"] + cst["fee"] + pos_st["pnl"]
+                wr = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
+                pos_txt = f" +持仓{pos_n}" if pos_n else ""
+                lines.append(f"{combo} 已平{closed_n}{pos_txt}笔 | 胜负 {wins}/{losses} | 盈亏 {pnl:+.2f} | 胜率 {wr:.0f}%")
         # 三周期及以上汇总（intervals>=3，兼容 4H 参与的组合）
         cst = {"n": 0, "wins": 0, "losses": 0, "realized": 0.0, "fee": 0.0}
         for combo, st in reso_closed_stats.items():
@@ -691,6 +729,8 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
         wr = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
         if total_n == 0:
             lines.append("三周期 0笔 | 胜负 -/- | 盈亏 - | 胜率 -")
+        elif cst["n"] == 0:
+            lines.append(f"三周期 持仓中 {reso_pos_triple_n}笔 | 浮盈 {reso_pos_triple_pnl:+.2f} | 胜负 -/- | 胜率 -")
         else:
             lines.append(f"三周期 {total_n}笔 | 胜负 {wins}/{losses} | 盈亏 {pnl:+.2f} | 胜率 {wr:.0f}%")
         lines.append("")
