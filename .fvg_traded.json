@@ -78,7 +78,7 @@
       "entry": 4320.9
     },
     "BTC_USDT|long": {
-      "status": "open",
+      "status": "closed",
       "algo_id": "3949153586759712768",
       "qty": 0.6,
       "time": "2026-09-24 01:45",
