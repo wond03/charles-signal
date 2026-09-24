@@ -51,17 +51,26 @@ jobs:
           OKX_API_SECRET: ${{ secrets.OKX_API_SECRET }}
           OKX_API_PASSPHRASE: ${{ secrets.OKX_API_PASSPHRASE }}
         run: |
-          # 推送 FVG 信号
-          python3 fvg_scanner.py --contract BTC_USDT --push || true
-          python3 fvg_scanner.py --contract XAU_USDT --push || true
+          # 推送 FVG 信号（scanner 崩溃时显式告警，禁止 || true 静默吞错）
+          set +e
+          python3 fvg_scanner.py --contract BTC_USDT --push
+          S1_RC=$?
+          python3 fvg_scanner.py --contract XAU_USDT --push
+          S2_RC=$?
           # 自动开单（不限制信号/次数/周期，BTC 100x / XAU 50x，5U/单，RR 1:2）
           # trader 崩溃时显式推送企微告警，禁止静默吞错（旧版 || true 掩盖致命故障）
-          set +e
           python3 trader.py --contract BTC_USDT --intervals 1h,15m,5m
           BTC_RC=$?
           python3 trader.py --contract XAU_USDT --intervals 1h,15m,5m
           XAU_RC=$?
           set -e
+          if [ $S1_RC -ne 0 ] || [ $S2_RC -ne 0 ]; then
+            echo "::error::fvg_scanner.py 崩溃退出 S1_RC=$S1_RC S2_RC=$S2_RC，已推送告警"
+            curl -s -X POST "$WECOM_WEBHOOK" -H 'Content-Type: application/json' \
+              -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"**⚠️ scanner 崩溃告警**\\n> 扫描进程异常退出（S1_RC=\`$S1_RC\` / S2_RC=\`$S2_RC\`），请立即查看 Actions 日志排查，FVG 信号可能缺失\"}}" || true
+          else
+            echo "fvg_scanner.py 正常退出"
+          fi
           if [ $BTC_RC -ne 0 ] || [ $XAU_RC -ne 0 ]; then
             echo "::error::trader.py 崩溃退出 BTC_RC=$BTC_RC XAU_RC=$XAU_RC，已推送告警"
             curl -s -X POST "$WECOM_WEBHOOK" -H 'Content-Type: application/json' \
@@ -89,6 +98,8 @@ jobs:
           python3 realtime_report.py || true
 
       - name: Persist state (dedup + trade records + realtime report)
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
         run: |
           git config user.name "marvis-bot"
           git config user.email "marvis-bot@users.noreply.github.com"
@@ -98,6 +109,13 @@ jobs:
           else
             git commit -m "chore: update fvg/trade state & realtime report [skip ci]"
             git pull --rebase --autostash || true
-            git push
+            if git push; then
+              echo "state pushed"
+            else
+              echo "::error::git push 失败，去重/交易状态滞留仓库本地，下轮可能重复处理"
+              curl -s -X POST "$WECOM_WEBHOOK" -H 'Content-Type: application/json' \
+                -d "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"**⚠️ 状态推送失败告警**\\n> git push 失败，去重/交易状态未同步到仓库，请立即查看 Actions 日志\"}}" || true
+              exit 1
+            fi
           fi
 
