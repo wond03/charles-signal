@@ -390,9 +390,9 @@ def trade_all_fvgs(contract, intervals, window_start, window_end, min_gap=1.0,
             if state["opened_signals"].get(sig_key):
                 continue  # 已开单，跳过
             # 单仓约束：同币种+同方向（跨周期）已有未平仓 → 跳过，防止 OKX 同向合并
+            # 2026-09-24 老板确认：未触发（单仓约束跳过）不推送企微，仅记本地日志
             if has_open_position(contract, direction, state):
-                print(f"[trade] 跳过: {contract} {direction} 已有未平仓(单仓约束,不限周期)")
-                notify_not_triggered(contract, sig_key, "同方向持仓中，单仓约束跳过开单", base_dir)
+                print(f"[trade] 跳过: {contract} {direction} 已有未平仓(单仓约束,不限周期), 未触发不推送企微")
                 continue
             f2 = dict(f)
             f2["interval"] = interval
