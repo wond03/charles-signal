@@ -48,6 +48,7 @@ MIN_GAP = 1.0  # gap 阈值：>=1 才算，0.x 小数不算
 LEVERAGE = {"BTC_USDT": 100, "XAU_USDT": 50}   # BTC 100x / XAU 50x
 TRADE_SIZE_USDT = 5.0                          # 单笔固定 5U
 RR = 2.0                                       # 盈亏比 1:2（TP = 2 × SL）
+MIN_SL_PCT = 0.003                             # 最小止损距离（入场价的 0.3%），防止 FVG 过窄导致扫损
 
 
 def fetch_klines(contract, interval, limit=1000, to_ts=None):
@@ -161,6 +162,7 @@ def scan(contract, intervals, window_start, window_end, min_gap=MIN_GAP):
             "fvgs": [
                 {
                     "time": bj_str(f["ts"]),
+                    "ts": f["ts"],
                     "type": f["type"],
                     "bottom": f["bottom"],
                     "top": f["top"],
@@ -220,13 +222,19 @@ def _color_for(f):
     return "info" if f["type"] == "bullish" else "warning"
 
 
-def compute_sltp(entry_price, fvg_type, bottom, top):
-    """与 trader.py 一致：SL=缺口边界，TP = entry ± RR×SL距离。"""
+def compute_sltp(entry_price, fvg_type, bottom, top, min_sl_pct=MIN_SL_PCT):
+    """与 trader.py 完全一致：SL=缺口边界，TP = entry ± RR×SL距离。
+    若缺口过窄（SL 距离 < 入场价 × min_sl_pct），按最小距离外扩止损，防扫损。
+    """
     if fvg_type == "bullish":
         sl = bottom
         sl_dist = entry_price - sl
         if sl_dist <= 0:
             sl_dist = abs(entry_price - bottom) or entry_price * 0.001
+            sl = entry_price - sl_dist
+        min_dist = entry_price * min_sl_pct
+        if sl_dist < min_dist:
+            sl_dist = min_dist
             sl = entry_price - sl_dist
         tp = entry_price + RR * sl_dist
         return round(sl, 4), round(tp, 4)
@@ -234,6 +242,10 @@ def compute_sltp(entry_price, fvg_type, bottom, top):
     sl_dist = sl - entry_price
     if sl_dist <= 0:
         sl_dist = abs(top - entry_price) or entry_price * 0.001
+        sl = entry_price + sl_dist
+    min_dist = entry_price * min_sl_pct
+    if sl_dist < min_dist:
+        sl_dist = min_dist
         sl = entry_price + sl_dist
     tp = entry_price - RR * sl_dist
     return round(sl, 4), round(tp, 4)
@@ -248,13 +260,6 @@ def latest_price(contract):
     except Exception:
         pass
     return None
-
-
-def signal_id(contract, f):
-    """生成信号 ID，如 FVG-BTC-20260923-1400。"""
-    sym = contract.split("_")[0]
-    t = f["time"].replace("-", "").replace(":", "").replace(" ", "-")
-    return f"FVG-{sym}-{t}"
 
 
 # ===== OKX 模拟盘真实参数（强平价/手续费）=====
@@ -337,22 +342,21 @@ def estimate_liq(entry_price, f_type, lev, mmr=0.005, taker_fee=0.0005):
     return round(entry_price * (1 + dist_pct / 100.0), 4)
 
 
-def estimate_net_pnl(entry_price, tp, f_type, notional, taker_fee=0.0005):
-    """止盈时预估净盈亏 = 毛利 - 双边真实 taker 手续费（OKX 模拟盘费率）。"""
-    if f_type == "bullish":
-        gross = (tp - entry_price) / entry_price * notional
-    else:
-        gross = (entry_price - tp) / entry_price * notional
-    fee = notional * taker_fee * 2.0
-    return gross - fee, fee
-
-
 def open_tpl_block(contract, f, entry_price):
-    """简化开仓区块（老板模板）：开仓/入场/止损/止盈/强平价，分隔线美化。"""
+    """简化开仓区块（老板模板）：开仓/入场/止损/止盈/强平价，分隔线美化。
+    行情获取失败时 entry_price<=0：省略 SL/TP/强平价，避免推送失真参数。
+    """
     lev = LEVERAGE.get(contract, 100)
-    sl, tp = compute_sltp(entry_price, f["type"], f["bottom"], f["top"])
     side = "多" if f["type"] == "bullish" else "空"
     dir_color = "info" if f["type"] == "bullish" else "warning"
+    if not entry_price or entry_price <= 0:
+        return (
+            "\n━━━━━━━━━━━━\n"
+            f"开仓：<font color=\"{dir_color}\">{side} {lev}x</font> ｜ {TRADE_SIZE_USDT:.0f}U保证金 ｜ 市价\n"
+            "入场：<font color=\"comment\">行情暂不可用</font>（最新价获取失败，SL/TP/强平价待恢复后补充）\n"
+            "━━━━━━━━━━━━"
+        )
+    sl, tp = compute_sltp(entry_price, f["type"], f["bottom"], f["top"])
     mmr, taker_fee = okx_params(contract)
     liq = estimate_liq(entry_price, f["type"], lev, mmr, taker_fee)
     return (
@@ -488,7 +492,7 @@ def main():
                   file=sys.stderr)
             sys.exit(2)
         state = load_pushed_state() if not args.no_dedup else {}
-        # 按时间收集待推送 FVG（先去重）：{时间: [(周期, fvg), ...]}
+        # 按时间+方向收集待推送 FVG（先去重）：{(时间, 方向): [(周期, fvg), ...]}
         by_time = defaultdict(list)
         for interval in intervals:
             info = result["intervals"].get(interval, {})
@@ -500,12 +504,17 @@ def main():
             else:
                 fresh = info["fvgs"]
             for f in fresh:
-                by_time[f["time"]].append((interval, f))
+                by_time[(f["time"], f["type"])].append((interval, f))
 
         pushed_any = False
-        entry_price = latest_price(result["contract"]) or 0.0
-        for time_str in sorted(by_time):
-            items = by_time[time_str]
+        entry_price = latest_price(result["contract"])
+        if not entry_price or entry_price <= 0:
+            entry_price = 0.0
+            print(f"[warn] {result['contract']} 最新价获取失败，推送将省略 SL/TP/强平价",
+                  file=sys.stderr)
+        for key in sorted(by_time):
+            time_str, ftype = key
+            items = by_time[key]
             f0 = items[0][1]
             holding = same_dir_positions(result["contract"], f0["type"])
             if holding:

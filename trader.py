@@ -33,11 +33,9 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import okx_exec
 
-# 交易参数（老板设定）
-TRADE_SIZE_USDT = 5.0          # 每次固定 5U
-LEVERAGE = {"BTC_USDT": 100, "XAU_USDT": 50}   # BTC 100x / XAU 50x
-RR = 2.0                       # 盈亏比 1:2（TP = 2 × SL）
-MIN_SL_PCT = 0.003             # 最小止损距离（入场价的 0.3%），防止 FVG 过窄导致扫损
+# 交易参数统一收敛到 fvg_scanner 单一来源（避免两套硬编码漂移）
+from fvg_scanner import LEVERAGE, TRADE_SIZE_USDT, RR, MIN_SL_PCT, compute_sltp
+
 TRADED_STATE_FILE = ".fvg_traded.json"  # 持仓/已开单状态（单仓约束去重）
 
 BJ_TZ = timezone(timedelta(hours=8))
@@ -178,38 +176,6 @@ def record_trade(base_dir, rec):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
     return path
-
-
-def compute_sltp(entry_price, fvg_type, bottom, top, min_sl_pct=MIN_SL_PCT):
-    """按盈亏比 1:2 计算止盈止损价。
-    看涨（多单）：止损在缺口下沿 bottom 下方；看跌（空单）：止损在缺口上沿 top 上方。
-    SL 距离 = 缺口边界到入场价距离；TP = 入场 ± 2 × SL 距离。
-    若缺口过窄（SL 距离 < 入场价 × min_sl_pct），按最小距离外扩止损，防扫损。
-    """
-    if fvg_type == "bullish":
-        sl = bottom
-        sl_dist = entry_price - sl
-        if sl_dist <= 0:
-            sl_dist = abs(entry_price - bottom) or entry_price * 0.001
-            sl = entry_price - sl_dist
-        min_dist = entry_price * min_sl_pct
-        if sl_dist < min_dist:
-            sl_dist = min_dist
-            sl = entry_price - sl_dist
-        tp = entry_price + RR * sl_dist
-        return round(sl, 4), round(tp, 4)
-    else:  # bearish
-        sl = top
-        sl_dist = sl - entry_price
-        if sl_dist <= 0:
-            sl_dist = abs(top - entry_price) or entry_price * 0.001
-            sl = entry_price + sl_dist
-        min_dist = entry_price * min_sl_pct
-        if sl_dist < min_dist:
-            sl_dist = min_dist
-            sl = entry_price + sl_dist
-        tp = entry_price - RR * sl_dist
-        return round(sl, 4), round(tp, 4)
 
 
 def open_position(contract, fvg, base_dir, dry_run=False):
