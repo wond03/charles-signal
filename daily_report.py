@@ -162,17 +162,20 @@ def fetch_fills(contract, begin_ms, end_ms):
     return out
 
 
-def fetch_bills(contract, begin_ms, end_ms, max_pages=10):
-    """拉 OKX 账单平仓记录（/api/v5/account/bills, type=2），返回升序列表。
-    真实已实现盈亏在 pnl 字段、手续费在 fee 字段；按 begin/end 窗口分页拉取。
+def fetch_bills(contract, begin_ms, end_ms, max_pages=10, bill_type="2"):
+    """拉 OKX 账单（/api/v5/account/bills），返回升序列表。
+    bill_type=2 平仓记录：真实已实现盈亏在 pnl 字段、手续费在 fee 字段；
+    bill_type=8 资金费记录：金额（含符号）在 pnl 字段。
+    按 begin/end 窗口分页拉取。
     同一订单多次成交会拆成多条 bill（ordId 相同），拉全后由
     _aggregate_closed_from_bills 合并为订单级，避免平仓笔数虚高。"""
     inst_okx = _INST_OKX.get(contract, contract)
     out, after = [], ""
+    rows = []
     for _ in range(max_pages):
         params = {"instType": "SWAP", "instId": inst_okx,
                   "begin": str(begin_ms), "end": str(end_ms),
-                  "type": "2", "limit": "100"}
+                  "type": bill_type, "limit": "100"}
         if after:
             params["after"] = after
         data = okx_exec._private_request("GET", "/api/v5/account/bills", params=params)
@@ -252,24 +255,6 @@ def _fmt_px(px):
         return f"{float(px):.2f}"
     except (TypeError, ValueError):
         return str(px)
-
-
-def _aggregate_closed(fills):
-    """把逐笔成交按 ordId 聚合为订单级记录。"""
-    by_oid = {}
-    for o in fills:
-        oid = o.get("ordId") or "?"
-        by_oid.setdefault(oid, []).append(o)
-    closed = []
-    for oid, items in by_oid.items():
-        pnl = sum(float(o.get("pnl") or 0.0) for o in items)
-        fee = sum(float(o.get("fee") or 0.0) for o in items)
-        side = items[0].get("side") or "?"
-        px = items[0].get("avgPx") or items[0].get("px")
-        ts = items[0].get("ts")
-        closed.append({"ord_id": oid, "side": side, "px": px, "ts": ts,
-                       "pnl": pnl, "fee": fee, "net": pnl + fee})
-    return closed
 
 
 def _aggregate_closed_from_bills(bills, trades):
@@ -471,6 +456,17 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
         else:
             warn.append(f"fills {contract} 查询失败")
     fills_all.sort(key=lambda x: int(x.get("ts") or 0))
+    # 资金费（bills type=8，窗口内真实已结算金额；pnl 字段含符号）
+    funding_total = 0.0
+    funding_ok = True
+    for contract in _INST_OKX:
+        fb = _safe(lambda c=contract: fetch_bills(c, begin_ms, end_ms, bill_type="8"), None)
+        if isinstance(fb, list):
+            funding_total += sum(float(b.get("pnl") or 0.0) for b in fb)
+        else:
+            funding_ok = False
+            warn.append(f"funding bills {contract} 查询失败")
+    funding_text = f"{funding_total:+.2f}" if funding_ok else "查询失败"
     acct = _safe(fetch_account_snapshot, None)
     pos = _safe(fetch_positions, None)
     algo = _safe(fetch_algo_pending, None)
@@ -498,7 +494,6 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
             n_pos += 1
             upl += float(p.get("upl") or 0.0)
             pos_rows_raw.append(p)
-    n_algo = len(algo) if isinstance(algo, list) else -1
     dir_stat = {"buy": 0, "sell": 0}
     period_open = {}
     for t in trades:
@@ -738,7 +733,7 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
         # 盈亏拆解
         lines.append("盈亏拆解")
         lines.append(f"已实现：{realized:+.2f} | 未实现：{upl:+.2f}")
-        lines.append(f"手续费：{fees:+.2f} | 资金费：0.00")
+        lines.append(f"手续费：{fees:+.2f} | 资金费：{funding_text}")
         lines.append(f"净盈亏：{net:+.2f} USDT")
         return "\n".join(lines)
 
@@ -804,7 +799,7 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
     # 四、盈亏拆解
     lines.append("四、盈亏拆解")
     lines.append(f"已实现：{realized:+.2f} | 未实现：{upl:+.2f}")
-    lines.append(f"手续费：{fees:+.2f} | 资金费：0.00")
+    lines.append(f"手续费：{fees:+.2f} | 资金费：{funding_text}")
     lines.append(f"净盈亏：{net:+.2f} USDT")
     lines.append("")
 
@@ -902,13 +897,6 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
     if dry:
         text += "\n\n[DRY-RUN 未推送]"
     return text
-
-
-def _compact_text(day_str, n_open, n_fills, net, realized, fees, upl, n_pos, n_algo,
-                  metrics, pos_by_contract, dir_stat, period_stat, fvg_stat, fvg_keys,
-                  closed_traded, pos, algo, acct, gh_runs, issues):
-    """企微推送版：直接复用 build_report compact 模板。"""
-    return build_report(day_str, base_dir=".", compact=True)
 
 
 # ---------------- 推送 ----------------
