@@ -257,6 +257,41 @@ def _fmt_px(px):
         return str(px)
 
 
+# 平仓原因判定容差（相对价差 0.15%，兼顾滑点与窄缺口场景）
+_TP_SL_TOL = 0.0015
+# OKX bills subType 强平/强减枚举（type=2 平仓类：16/17/24/25/32/33=强平，13/14=强减，207/209=强平）
+_LIQ_SUBTYPES = {"13", "14", "16", "17", "24", "25", "32", "33", "207", "209"}
+
+
+def _classify_close_reason(rec):
+    """平仓原因分类：tp=止盈 / sl=止损(含保本) / liq=强平 / manual=手动平仓。
+    手动平仓（老板或 Agent 手动执行）不计入绩效统计，仅在报告中备注。"""
+    sub = str(rec.get("sub_type") or "")
+    if sub in _LIQ_SUBTYPES:
+        return "liq"
+    try:
+        px = float(rec.get("px"))
+    except (TypeError, ValueError):
+        return "manual"  # 无成交价无法判定，按手动处理
+    if px <= 0:
+        return "manual"
+
+    def _near(a, b):
+        try:
+            return abs(float(a) - float(b)) / abs(float(b)) <= _TP_SL_TOL
+        except (TypeError, ValueError, ZeroDivisionError):
+            return False
+
+    # 优先级：止盈价 > 止损价 > 保本位（价格≈开仓价，系统自动移保本，归止损侧分母）
+    if _near(rec.get("tp"), px):
+        return "tp"
+    if _near(rec.get("sl"), px):
+        return "sl"
+    if _near(rec.get("entry"), px):
+        return "sl"
+    return "manual"
+
+
 def _aggregate_closed_from_bills(bills, trades):
     """基于 bills(type=2 平仓) 聚合为订单级记录（真实 pnl/fee）。
     同一订单多次成交会被拆成多条 bill（ordId 相同），先按 ordId 合并为一条订单记录，
@@ -351,7 +386,11 @@ def _aggregate_closed_from_bills(bills, trades):
                "interval": (matched[0] if matched else {}).get("interval") or "?",
                "contract": contract,
                "px": b.get("px"), "ts": b.get("ts"),
-               "pnl": pnl, "fee": fee, "net": pnl + fee}
+               "pnl": pnl, "fee": fee, "net": pnl + fee,
+               "sub_type": sub,
+               "tp": (matched[0] if matched else {}).get("tp"),
+               "sl": (matched[0] if matched else {}).get("sl"),
+               "entry": (matched[0] if matched else {}).get("entry_ref")}
         if matched:
             # 按平仓数量消耗开仓单剩余量；无 sz 时退化为一次性消耗
             if sz > 0:
@@ -360,6 +399,7 @@ def _aggregate_closed_from_bills(bills, trades):
                 matched[1] = 0.0
             rec["ord_id"] = matched[0]["ord_id"]
             rec["open_time"] = matched[0].get("time")
+        rec["reason"] = _classify_close_reason(rec)
         closed.append(rec)
     closed.sort(key=lambda x: int(x.get("ts") or 0))
     return closed
@@ -495,39 +535,26 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
             upl += float(p.get("upl") or 0.0)
             pos_rows_raw.append(p)
     dir_stat = {"buy": 0, "sell": 0}
-    period_open = {}
     for t in trades:
         dir_stat[t.get("side") or "?"] = dir_stat.get(t.get("side") or "?", 0) + 1
-        iv = t.get("interval") or "?"
-        period_open.setdefault(iv, {"open": 0, "long": 0, "short": 0})
-        period_open[iv]["open"] += 1
-        if (t.get("side") or "") == "buy":
-            period_open[iv]["long"] += 1
-        else:
-            period_open[iv]["short"] += 1
-    metrics = compute_metrics(closed_traded)
 
-    # ---- 分周期×方向绩效：closed 已带 interval/direction，逐维统计 ----
-    period_perf = {}   # iv -> {"open": n, "long": n, "short": n, "dir": {dir -> stats}}
-    for iv in period_open:
-        period_perf[iv] = {"open": period_open[iv]["open"],
-                           "long": period_open[iv]["long"],
-                           "short": period_open[iv]["short"],
-                           "dir": {}}
-    for c in closed:
+    # ---- 手动平仓口径：reason=manual（老板/Agent 手动执行）不计入绩效统计，仅备注 ----
+    closed_stat = [c for c in closed if c.get("reason") != "manual"]
+    manual_closed = [c for c in closed if c.get("reason") == "manual"]
+    manual_n = len(manual_closed)
+    manual_pnl = sum(c["pnl"] for c in manual_closed)
+    metrics = compute_metrics(closed_stat)
+
+    # ---- 分周期×品种绩效（模板口径）：止盈/止损/强平分类，手动平仓剔除 ----
+    period_perf = {}   # (iv, contract) -> {"tp": n, "sl": n, "liq": n, "pnl": realized}
+    for c in closed_stat:
         iv = c.get("interval") or "?"
-        d = c.get("direction") or "?"
-        p = period_perf.setdefault(iv, {"open": 0, "long": 0, "short": 0, "dir": {}})
-        st = p["dir"].setdefault(d, {"closed": 0, "wins": 0, "losses": 0,
-                                     "realized": 0.0, "fee": 0.0})
-        st["realized"] += c["pnl"]
-        st["fee"] += c["fee"]
-        if c["pnl"] != 0:
-            st["closed"] += 1
-            if c["pnl"] > 0:
-                st["wins"] += 1
-            else:
-                st["losses"] += 1
+        key = (iv, c.get("contract") or "?")
+        p = period_perf.setdefault(key, {"tp": 0, "sl": 0, "liq": 0, "pnl": 0.0})
+        r = c.get("reason") or "manual"
+        if r in ("tp", "sl", "liq"):
+            p[r] += 1
+        p["pnl"] += c["pnl"]
 
     # ---- 多周期共振：同一合约+方向+开单时刻(分钟级)聚合周期集合 ----
     # 避免按 (contract, direction) 全量聚合导致周期虚高（如全天 5m 单混入三周期）
@@ -574,9 +601,9 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
     for r in reso_list:
         combo_stat[r["combo"]] = combo_stat.get(r["combo"], 0) + 1
 
-    # ---- 共振组合平仓统计：closed(带 interval/direction/open_time) -> reso 组 -> combo ----
+    # ---- 共振组合平仓统计：closed(带 interval/direction/open_time) -> reso 组 -> (combo, contract) ----
     reso_closed_stats = {}
-    for c in closed:
+    for c in closed_stat:  # 手动平仓剔除
         if c.get("interval") == "?" or not c.get("open_time"):
             continue
         # 找包含该开仓单所属周期集合的共振组：合约+方向+开仓时刻一致
@@ -586,12 +613,13 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
             continue
         ivs = sorted(g["intervals"], key=lambda x: {"5m": 0, "15m": 1, "1h": 2, "4h": 3}.get(x, 9))
         combo = "+".join(iv.upper() for iv in ivs)
-        st = reso_closed_stats.setdefault(combo, {"n": 0, "wins": 0, "losses": 0, "realized": 0.0, "fee": 0.0})
+        ckey = (combo, c.get("contract") or "?")
+        st = reso_closed_stats.setdefault(ckey, {"n": 0, "tp": 0, "sl": 0, "liq": 0,
+                                                 "realized": 0.0, "fee": 0.0})
         st["n"] += 1
-        if c["pnl"] > 0:
-            st["wins"] += 1
-        elif c["pnl"] < 0:
-            st["losses"] += 1
+        r = c.get("reason") or "manual"
+        if r in ("tp", "sl", "liq"):
+            st[r] += 1
         st["realized"] += c["pnl"]
         st["fee"] += c["fee"]
 
@@ -653,88 +681,109 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
             ret = (net + upl) / init_approx if init_approx else 0.0
             pf = metrics.get("profit_factor") if metrics.get("sample") else None
             pf_s = f"{pf:.2f}" if pf else "N/A"
-            lines.append(f"总盈亏 {net + upl:+.2f} | 总开仓 {n_open} | 总平仓 {len(closed_traded)} | 收益率 {ret * 100:+.2f}% | 盈亏比 {pf_s}")
+            lines.append(f"总盈亏 {net + upl:+.2f} | 总开仓 {n_open} | 总平仓 {len(closed_stat)} | 收益率 {ret * 100:+.2f}% | 盈亏比 {pf_s}")
         else:
             lines.append(f"账户接口不可用：{acct if acct else 'balance 无返回'}")
         lines.append("")
 
-        # 分周期×方向绩效（盈亏为已实现 pnl，不含手续费，与盈亏拆解口径一致）
-        lines.append("分周期绩效（多/空）")
+        # 分周期×品种绩效（模板口径：止盈/止损/强平分类，盈亏=已实现不含手续费，手动平仓剔除）
+        lines.append("分周期绩效（周期×品种）")
         iv_order = {"5m": "5M", "15m": "15M", "1h": "1H", "4h": "4H", "?": "老仓"}
-        for iv in ("5m", "15m", "1h", "?"):
-            if iv == "?":
-                q = period_perf.get("?")
-                if not q or not q["dir"]:
-                    continue
-            p = period_perf.get(iv, {"open": 0, "long": 0, "short": 0, "dir": {}})
-            segs = []
-            for d in ("long", "short"):
-                st = p["dir"].get(d, {"closed": 0, "wins": 0, "losses": 0,
-                                      "realized": 0.0, "fee": 0.0})
-                losses = st["losses"]
-                wr = (st["wins"] / st["closed"] * 100) if st["closed"] else 0.0
-                pnet = st["realized"]
-                d_cn = "多" if d == "long" else "空"
-                segs.append(f"{d_cn}{st['closed']}笔 胜{st['wins']}/{losses} {pnet:+.2f}U {wr:.0f}%")
-            lines.append(f"{iv_order[iv]} 开{p['open']} | " + " | ".join(segs))
+
+        def _period_line(iv, contract):
+            p = period_perf.get((iv, contract))
+            if not p:
+                return None
+            n = p["tp"] + p["sl"] + p["liq"]
+            if n == 0:
+                return None
+            wr = p["tp"] / n * 100
+            ct = contract.replace("_USDT", "")
+            return (f"{iv_order.get(iv, iv.upper())}·{ct} {n}单 | "
+                    f"止盈{p['tp']}/止损{p['sl']}/强平{p['liq']} | "
+                    f"{p['pnl']:+.2f}U | 胜率{wr:.1f}%")
+
+        ivs = sorted({iv for (iv, _c) in period_perf},
+                     key=lambda x: {"5m": 0, "15m": 1, "1h": 2, "4h": 3}.get(x, 9))
+        if not ivs:
+            lines.append("暂无平仓统计")
+        for iv in ivs:
+            for contract in ("BTC_USDT", "XAU_USDT"):
+                line = _period_line(iv, contract)
+                if line:
+                    lines.append(line)
+                else:
+                    lines.append(f"{iv_order.get(iv, iv.upper())}·{contract.replace('_USDT', '')} —")
+        if manual_n:
+            lines.append(f"备注：手动平仓 {manual_n} 笔（盈亏 {manual_pnl:+.2f}U）已剔除，不计入上表")
         lines.append("")
 
-        # 共振组合分布
-        lines.append("共振组合分布")
+        # 多周期共振（组合×品种，模板口径）
+        lines.append("多周期共振（组合×品种）")
+
+        def _combo_order(combo):
+            base = {"5M+15M": 0, "15M+1H": 1, "5M+1H": 2}.get(combo, 9)
+            return (base, combo)
+
         reso_pos_stat = {}
         reso_pos_triple_n, reso_pos_triple_pnl = 0, 0.0
         for r in reso_list:
             if r.get("triple"):
                 reso_pos_triple_n += 1
                 reso_pos_triple_pnl += r["pnl"] or 0.0
-            st = reso_pos_stat.setdefault(r["combo"], {"n": 0, "pnl": 0.0})
+            st = reso_pos_stat.setdefault((r["combo"], r["contract"]), {"n": 0, "pnl": 0.0})
             st["n"] += 1
             st["pnl"] += r["pnl"] or 0.0
-        for combo in ("5M+15M", "15M+1H", "5M+1H"):
-            pos_st = reso_pos_stat.get(combo, {"n": 0, "pnl": 0.0})
-            cst = reso_closed_stats.get(combo, {"n": 0, "wins": 0, "losses": 0,
-                                                "realized": 0.0, "fee": 0.0})
-            closed_n = cst["n"]
-            pos_n = pos_st["n"]
-            if closed_n == 0 and pos_n == 0:
-                lines.append(f"{combo} 0笔 | 胜负 -/- | 盈亏 - | 胜率 -")
-            elif closed_n == 0:
-                # 仅持仓中：浮盈不参与胜负/胜率，避免“0胜0负却有盈亏”的误读
-                lines.append(f"{combo} 持仓中 {pos_n}笔 | 浮盈 {pos_st['pnl']:+.2f} | 胜负 -/- | 胜率 -")
-            else:
-                wins = cst["wins"]
-                losses = cst["losses"]
-                pnl = cst["realized"] + cst["fee"] + pos_st["pnl"]
-                wr = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
-                pos_txt = f" +持仓{pos_n}" if pos_n else ""
-                lines.append(f"{combo} 已平{closed_n}{pos_txt}笔 | 胜负 {wins}/{losses} | 盈亏 {pnl:+.2f} | 胜率 {wr:.0f}%")
+        combos = sorted(set([k[0] for k in reso_closed_stats]) | set([k[0] for k in reso_pos_stat]),
+                        key=_combo_order)
+        if not combos:
+            lines.append("暂无共振记录")
+        for combo in combos:
+            for contract in ("BTC_USDT", "XAU_USDT"):
+                ct = contract.replace("_USDT", "")
+                cst = reso_closed_stats.get((combo, contract), {"n": 0, "tp": 0, "sl": 0, "liq": 0,
+                                                                "realized": 0.0, "fee": 0.0})
+                pos_st = reso_pos_stat.get((combo, contract), {"n": 0, "pnl": 0.0})
+                closed_n = cst["n"]
+                pos_n = pos_st["n"]
+                if closed_n == 0 and pos_n == 0:
+                    continue
+                if closed_n == 0:
+                    # 仅持仓中：浮盈不参与胜负/胜率，避免“0单却有盈亏”的误读
+                    lines.append(f"{combo}·{ct} 持仓中 {pos_n}笔 | 浮盈 {pos_st['pnl']:+.2f} | 止盈/止损/强平 -/-/- | 胜率 -")
+                else:
+                    wr = cst["tp"] / closed_n * 100
+                    pos_txt = f" +持仓{pos_n}" if pos_n else ""
+                    lines.append(f"{combo}·{ct} 已平{closed_n}{pos_txt}单 | "
+                                 f"止盈{cst['tp']}/止损{cst['sl']}/强平{cst['liq']} | "
+                                 f"盈亏 {cst['realized']:+.2f}U | 胜率{wr:.1f}%")
         # 三周期及以上汇总（intervals>=3，兼容 4H 参与的组合）
-        cst = {"n": 0, "wins": 0, "losses": 0, "realized": 0.0, "fee": 0.0}
-        for combo, st in reso_closed_stats.items():
+        cst = {"n": 0, "tp": 0, "sl": 0, "liq": 0, "realized": 0.0}
+        for (combo, _c), st in reso_closed_stats.items():
             if len(combo.split("+")) >= 3:
                 cst["n"] += st["n"]
-                cst["wins"] += st["wins"]
-                cst["losses"] += st["losses"]
+                cst["tp"] += st["tp"]
+                cst["sl"] += st["sl"]
+                cst["liq"] += st["liq"]
                 cst["realized"] += st["realized"]
-                cst["fee"] += st["fee"]
         total_n = cst["n"] + reso_pos_triple_n
-        wins = cst["wins"]
-        losses = cst["losses"]
-        pnl = cst["realized"] + cst["fee"] + reso_pos_triple_pnl
-        wr = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
-        if total_n == 0:
-            lines.append("三周期 0笔 | 胜负 -/- | 盈亏 - | 胜率 -")
-        elif cst["n"] == 0:
-            lines.append(f"三周期 持仓中 {reso_pos_triple_n}笔 | 浮盈 {reso_pos_triple_pnl:+.2f} | 胜负 -/- | 胜率 -")
-        else:
-            lines.append(f"三周期 {total_n}笔 | 胜负 {wins}/{losses} | 盈亏 {pnl:+.2f} | 胜率 {wr:.0f}%")
+        if total_n:
+            if cst["n"] == 0:
+                lines.append(f"三周期 持仓中 {reso_pos_triple_n}笔 | 浮盈 {reso_pos_triple_pnl:+.2f}")
+            else:
+                wr = cst["tp"] / cst["n"] * 100
+                pos_txt = f" +持仓{reso_pos_triple_n}" if reso_pos_triple_n else ""
+                lines.append(f"三周期 已平{cst['n']}{pos_txt}单 | 止盈{cst['tp']}/止损{cst['sl']}/强平{cst['liq']} | "
+                             f"盈亏 {cst['realized']:+.2f}U | 胜率{wr:.1f}%")
         lines.append("")
 
-        # 盈亏拆解
+        # 盈亏拆解（账户口径：已实现含手动平仓；平台成交时已划扣手续费，盈亏不含手续费属正常）
         lines.append("盈亏拆解")
         lines.append(f"已实现：{realized:+.2f} | 未实现：{upl:+.2f}")
         lines.append(f"手续费：{fees:+.2f} | 资金费：{funding_text}")
         lines.append(f"净盈亏：{net:+.2f} USDT")
+        if manual_n:
+            lines.append(f"备注：手动平仓 {manual_n} 笔（盈亏 {manual_pnl:+.2f}U）仅备注，不计入绩效统计")
         return "\n".join(lines)
 
     lines = []
@@ -756,7 +805,9 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
 
     # 二、交易概览
     lines.append("二、交易概览")
-    lines.append(f"总开仓 {n_open} | 总平仓 {len(closed_traded)} | 总持仓 {n_pos} | 拒单 0")
+    lines.append(f"总开仓 {n_open} | 总平仓 {len(closed_stat)} | 总持仓 {n_pos} | 拒单 0")
+    if manual_n:
+        lines.append(f"（手动平仓 {manual_n} 笔另计，盈亏 {manual_pnl:+.2f}U，仅备注）")
     if pos_by_contract := {t.get("contract"): 0 for t in trades}:
         for t in trades:
             pos_by_contract[t.get("contract")] += 1
@@ -764,43 +815,81 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
                  + "  |  多 " + str(dir_stat.get("buy", 0)) + " / 空 " + str(dir_stat.get("sell", 0)))
     lines.append("")
 
-    # 三、分周期×方向绩效
-    lines.append("三、分周期绩效（多/空）")
-    iv_order = {"5m": "5M", "15m": "15M", "1h": "1H", "4h": "4H"}
-    for iv in sorted(period_perf, key=lambda x: {"5m": 0, "15m": 1, "1h": 2, "4h": 3}.get(x, 9)):
-        p = period_perf[iv]
-        lines.append(f"• {iv_order.get(iv, iv.upper())} ：开 {p['open']}（多 {p['long']} / 空 {p['short']}）")
-        for d in ("long", "short"):
-            st = p["dir"].get(d, {"closed": 0, "wins": 0, "losses": 0,
-                                  "realized": 0.0, "fee": 0.0})
-            pnet = st["realized"]
-            wr = (st["wins"] / st["closed"] * 100) if st["closed"] else 0.0
-            d_cn = "多" if d == "long" else "空"
-            lines.append(f"   {d_cn}：平 {st['closed']} | 胜 {st['wins']} / 负 {st['losses']} | "
-                         f"胜率 {wr:.0f}% | 盈亏(已实现) {pnet:+.2f}")
-    # 共振
-    lines.append("⚡ 多周期共振" + ("（详细）" if n_reso else ""))
-    lines.append(f"📌 今日共 {n_reso} 笔共振")
-    for r in reso_list:
-        pnl_s = f"{r['pnl']:+.2f}" if r["pnl"] is not None else "-"
-        tag = "浮亏" if (r["pnl"] or 0) < 0 else "浮盈"
-        dir_cn = "多" if r["dir"] in ("long", "buy") else "空"
-        lines.append(f"• {r['contract'].replace('_USDT', '')} {r['combo']} {dir_cn} | {r['status']} | "
-                     f"开{r['open']} 现{r['cur']} | {tag} {pnl_s}")
-    c_5_15 = sum(1 for r in reso_list if r["combo"] == "5M+15M") + reso_closed_stats.get("5M+15M", {}).get("n", 0)
-    c_15_1h = sum(1 for r in reso_list if r["combo"] == "15M+1H") + reso_closed_stats.get("15M+1H", {}).get("n", 0)
-    c_triple = sum(1 for r in reso_list if r["triple"])
-    for combo, st in reso_closed_stats.items():
-        if len(combo.split("+")) >= 3:
-            c_triple += st["n"]
-    lines.append(f"📌 共振组合分布：5M+15M {c_5_15}笔 | 15M+1H {c_15_1h}笔 | 三周期共振 {c_triple}笔")
+    # 三、分周期×品种绩效（模板口径）
+    lines.append("三、分周期绩效（周期×品种）")
+    iv_order = {"5m": "5M", "15m": "15M", "1h": "1H", "4h": "4H", "?": "老仓"}
+    ivs = sorted({iv for (iv, _c) in period_perf},
+                 key=lambda x: {"5m": 0, "15m": 1, "1h": 2, "4h": 3}.get(x, 9))
+    if ivs:
+        lines.append("| 周期 | 品种 | 订单数 | 止盈/止损/强平 | 盈亏 | 胜率 |")
+        lines.append("|------|------|--------|----------------|------|------|")
+        for iv in ivs:
+            for contract in ("BTC_USDT", "XAU_USDT"):
+                ct = contract.replace("_USDT", "")
+                p = period_perf.get((iv, contract))
+                if not p:
+                    lines.append(f"| {iv_order.get(iv, iv.upper())} | {ct} | — | —/—/— | — | — |")
+                    continue
+                n = p["tp"] + p["sl"] + p["liq"]
+                if n == 0:
+                    lines.append(f"| {iv_order.get(iv, iv.upper())} | {ct} | — | —/—/— | — | — |")
+                    continue
+                wr = p["tp"] / n * 100
+                lines.append(f"| {iv_order.get(iv, iv.upper())} | {ct} | {n} | {p['tp']}/{p['sl']}/{p['liq']} | {p['pnl']:+.2f}U | {wr:.2f}% |")
+    else:
+        lines.append("暂无平仓统计")
+    if manual_n:
+        lines.append(f"备注：手动平仓 {manual_n} 笔（盈亏 {manual_pnl:+.2f}U）已剔除，不计入上表")
     lines.append("")
 
-    # 四、盈亏拆解
+    # 多周期共振（组合×品种，模板口径）
+    lines.append("⚡ 多周期共振" + ("（详细）" if n_reso else ""))
+    reso_pos_stat = {}
+    reso_pos_triple_n, reso_pos_triple_pnl = 0, 0.0
+    for r in reso_list:
+        if r.get("triple"):
+            reso_pos_triple_n += 1
+            reso_pos_triple_pnl += r["pnl"] or 0.0
+        st = reso_pos_stat.setdefault((r["combo"], r["contract"]), {"n": 0, "pnl": 0.0})
+        st["n"] += 1
+        st["pnl"] += r["pnl"] or 0.0
+    combos = sorted(set([k[0] for k in reso_closed_stats]) | set([k[0] for k in reso_pos_stat]),
+                    key=lambda combo: ({"5M+15M": 0, "15M+1H": 1, "5M+1H": 2}.get(combo, 9), combo))
+    if combos:
+        lines.append("| 共振组合 | 品种 | 订单数 | 止盈/止损/强平 | 盈亏 | 胜率 |")
+        lines.append("|----------|------|--------|----------------|------|------|")
+        for combo in combos:
+            for contract in ("BTC_USDT", "XAU_USDT"):
+                ct = contract.replace("_USDT", "")
+                cst = reso_closed_stats.get((combo, contract), {"n": 0, "tp": 0, "sl": 0, "liq": 0,
+                                                                "realized": 0.0, "fee": 0.0})
+                pos_st = reso_pos_stat.get((combo, contract), {"n": 0, "pnl": 0.0})
+                if cst["n"] == 0 and pos_st["n"] == 0:
+                    continue
+                if cst["n"] == 0:
+                    lines.append(f"| {combo} | {ct} | 持仓中 {pos_st['n']} | 浮盈 {pos_st['pnl']:+.2f} | — | — |")
+                else:
+                    wr = cst["tp"] / cst["n"] * 100
+                    pos_txt = f" (+持仓{pos_st['n']})" if pos_st["n"] else ""
+                    lines.append(f"| {combo} | {ct} | {cst['n']}{pos_txt} | {cst['tp']}/{cst['sl']}/{cst['liq']} | {cst['realized']:+.2f}U | {wr:.2f}% |")
+    else:
+        lines.append("今日无共振组合")
+    if n_reso:
+        for r in reso_list:
+            pnl_s = f"{r['pnl']:+.2f}" if r["pnl"] is not None else "-"
+            tag = "浮亏" if (r["pnl"] or 0) < 0 else "浮盈"
+            dir_cn = "多" if r["dir"] in ("long", "buy") else "空"
+            lines.append(f"• {r['contract'].replace('_USDT', '')} {r['combo']} {dir_cn} | {r['status']} | "
+                         f"开{r['open']} 现{r['cur']} | {tag} {pnl_s}")
+    lines.append("")
+
+    # 四、盈亏拆解（账户口径：已实现含手动平仓；平台成交时已划扣手续费，盈亏不含手续费属正常）
     lines.append("四、盈亏拆解")
     lines.append(f"已实现：{realized:+.2f} | 未实现：{upl:+.2f}")
     lines.append(f"手续费：{fees:+.2f} | 资金费：{funding_text}")
     lines.append(f"净盈亏：{net:+.2f} USDT")
+    if manual_n:
+        lines.append(f"备注：手动平仓 {manual_n} 笔（盈亏 {manual_pnl:+.2f}U）仅备注，不计入绩效统计")
     lines.append("")
 
     # 五、绩效指标
@@ -857,7 +946,9 @@ def build_report(day_str, dry=False, base_dir=".", compact=False, rolling=False)
         if closed_traded:
             for c in closed_traded[-8:]:
                 arrow = "▲" if c["side"] == "buy" else "▼"
-                lines.append(f"- {arrow} {c['ord_id'][-6:]} {_fmt_ts(c['ts'])} 价 {c['px'] or '-'} 净 {c['net']:+.2f}")
+                tag = {"tp": "止盈", "sl": "止损", "liq": "强平", "manual": "手动"}.get(c.get("reason"), "")
+                tag_s = f" [{tag}]" if tag else ""
+                lines.append(f"- {arrow} {c['ord_id'][-6:]} {_fmt_ts(c['ts'])} 价 {c['px'] or '-'} 净 {c['net']:+.2f}{tag_s}")
         else:
             lines.append("- 当日无平仓成交记录")
         lines.append("【持仓/挂单】")
