@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write           # 提交去重状态与交易记录回仓库
 
+concurrency:
+  group: fvg-scan-and-trade
+  cancel-in-progress: false   # 同组 run 串行执行，避免手动触发与 schedule 并发提交冲突
+
 jobs:
   scan-trade:
     runs-on: ubuntu-latest
