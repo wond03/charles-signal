@@ -236,5 +236,22 @@
     "ord_id": "3951045680198746112",
     "qty": 0.6,
     "algo_id": "3951045695712378880"
+  },
+  {
+    "time": "2026-09-24 09:45",
+    "ts": 1790214300,
+    "contract": "XAU_USDT",
+    "interval": "15m",
+    "type": "bearish",
+    "side": "sell",
+    "direction": "short",
+    "entry_ref": 4284.0,
+    "sl": 4302.43,
+    "tp": 4247.14,
+    "size_usdt": 5.0,
+    "leverage": 50,
+    "ord_id": "3951106076800614400",
+    "qty": 59.0,
+    "algo_id": "3951106089093021696"
   }
 ]
