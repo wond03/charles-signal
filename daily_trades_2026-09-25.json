@@ -1,0 +1,19 @@
+[
+  {
+    "time": "2026-09-25 09:15",
+    "ts": 1790298900,
+    "contract": "BTC_USDT",
+    "interval": "15m",
+    "type": "bullish",
+    "side": "buy",
+    "direction": "long",
+    "entry_ref": 84671.0,
+    "sl": 84416.987,
+    "tp": 85179.026,
+    "size_usdt": 5.0,
+    "leverage": 100,
+    "ord_id": "3952596084774567936",
+    "qty": 0.6,
+    "algo_id": "3952596094785273856"
+  }
+]
