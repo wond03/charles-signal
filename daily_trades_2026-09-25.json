@@ -253,5 +253,39 @@
     "ord_id": "3954106408447148032",
     "qty": 0.6,
     "algo_id": "3954106423826563072"
+  },
+  {
+    "time": "2026-09-25 11:00",
+    "ts": 1790305200,
+    "contract": "BTC_USDT",
+    "interval": "15m",
+    "type": "bearish",
+    "side": "sell",
+    "direction": "short",
+    "entry_ref": 83786.8,
+    "sl": 84362.0,
+    "tp": 82636.4,
+    "size_usdt": 5.0,
+    "leverage": 100,
+    "ord_id": "3954116284724445184",
+    "qty": 0.6,
+    "algo_id": "3954116300909166592"
+  },
+  {
+    "time": "2026-09-25 18:30",
+    "ts": 1790332200,
+    "contract": "BTC_USDT",
+    "interval": "15m",
+    "type": "bullish",
+    "side": "buy",
+    "direction": "long",
+    "entry_ref": 83799.9,
+    "sl": 83070.7,
+    "tp": 85258.3,
+    "size_usdt": 5.0,
+    "leverage": 100,
+    "ord_id": "3954116379045953536",
+    "qty": 0.6,
+    "algo_id": "3954116395029348352"
   }
 ]
