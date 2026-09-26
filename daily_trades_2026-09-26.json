@@ -1,0 +1,19 @@
+[
+  {
+    "time": "2026-09-26 08:30",
+    "ts": 1790382600,
+    "contract": "BTC_USDT",
+    "interval": "15m",
+    "type": "bearish",
+    "side": "sell",
+    "direction": "short",
+    "entry_ref": 84235.1,
+    "sl": 84487.8053,
+    "tp": 83729.6894,
+    "size_usdt": 5.0,
+    "leverage": 100,
+    "ord_id": "3956390972955721728",
+    "qty": 0.6,
+    "algo_id": "3956390988536463360"
+  }
+]
